@@ -2034,6 +2034,16 @@
         let playLoadConfirmedToken = -1;
 
         const nowPlayingSheet = document.getElementById('nowPlayingSheet');
+
+        // Stato della "coda in ascolto": separata da appState.tracks (la lista che si
+        // sta sfogliando in questo momento) perché possono essere due cose diverse -
+        // es. si continua ad ascoltare una playlist mentre se ne sfoglia un'altra.
+        let nowPlayingTracks = [];
+        let nowPlayingIndex = -1;
+        let nowPlayingUnavailable = false;
+        let nowPlayingListType = null;
+        let nowPlayingListKey = null;
+        let nowPlayingListTitle = '';
         const miniPlayer = document.getElementById('miniPlayer');
 
         // ================= Skin "Immersive": colore dominante scuro dall'artwork =================
