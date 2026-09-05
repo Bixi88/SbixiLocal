@@ -12,6 +12,9 @@
   "dependencies": {
     "@capacitor/android": "^8.5.1",
     "@capacitor/cli": "^8.5.1",
-    "@capacitor/core": "^8.5.1"
+    "@capacitor/core": "^8.5.1",
+    "@fontsource/inter": "^5.3.0",
+    "@fortawesome/fontawesome-free": "^7.3.1",
+    "@tailwindcss/browser": "^4.3.3"
   }
 }
