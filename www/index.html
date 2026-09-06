@@ -1757,7 +1757,7 @@
                             <i class="fa-solid fa-arrow-left"></i>
                         </button>
                         <span class="rt display" id="resultsTitle">Risultati</span>
-                        <button id="refreshPlaylistBtn" class="hidden refresh-btn" title="Aggiorna playlist (ricarica da Spotify, salta la cache)">
+                        <button id="refreshPlaylistBtn" class="hidden refresh-btn" title="Aggiorna playlist (rilegge la cartella)">
                             <i class="fa-solid fa-rotate"></i>
                         </button>
                     </div>
@@ -2903,6 +2903,13 @@
             document.getElementById('backToHomeBtn').addEventListener('click', () => {
                 window.history.back();
             });
+            document.getElementById('refreshPlaylistBtn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                const uri = e.currentTarget.dataset.folderUri;
+                if (!uri) return;
+                hapticFeedback();
+                openLocalPlaylist(uri, currentLoadedTitle, true);
+            });
 
             // Pulsante aggiornamento app e barra di ricerca rimossi: niente service
             // worker, niente ricerca/import online in SbixiLocal.
@@ -3097,18 +3104,39 @@
         // Gesture di chiusura "swipe verso il basso" della Now Playing sheet: tenuta in
         // variabili/funzioni condivise così può essere richiamata da più punti che
         // intercettano il tocco prima che arrivi a #sheetSwipeCloseArea.
-        let sheetCloseIsDragging = false, sheetCloseStartY = 0, sheetCloseCurrentY = 0, sheetCloseBasePercent = -100;
+        let sheetCloseIsDragging = false, sheetCloseStartX = 0, sheetCloseStartY = 0, sheetCloseCurrentY = 0, sheetCloseBasePercent = -100;
+        let sheetCloseDirectionLocked = false, sheetCloseDirectionIsVertical = false;
+        const SHEET_CLOSE_DIRECTION_THRESHOLD = 10; // px minimi prima di decidere se è uno swipe verticale o laterale
 
-        function sheetCloseStart(y) {
+        function sheetCloseStart(x, y) {
             sheetCloseIsDragging = true;
+            sheetCloseStartX = x;
             sheetCloseStartY = y;
+            sheetCloseDirectionLocked = false;
+            sheetCloseDirectionIsVertical = false;
             sheetCloseBasePercent = getSheetCurrentPercentY();
             nowPlayingSheet.style.transition = 'none';
         }
 
-        function sheetCloseMove(y) {
+        function sheetCloseMove(x, y) {
             if (!sheetCloseIsDragging) return;
+            const deltaX = x - sheetCloseStartX;
             sheetCloseCurrentY = y - sheetCloseStartY;
+
+            if (!sheetCloseDirectionLocked) {
+                if (Math.abs(deltaX) > SHEET_CLOSE_DIRECTION_THRESHOLD || Math.abs(sheetCloseCurrentY) > SHEET_CLOSE_DIRECTION_THRESHOLD) {
+                    sheetCloseDirectionLocked = true;
+                    // Serve un movimento chiaramente più verticale che laterale: uno swipe
+                    // per cambiare brano ha quasi sempre un po' di "sbandamento" verticale,
+                    // che altrimenti veniva scambiato per l'inizio di uno swipe di chiusura.
+                    sheetCloseDirectionIsVertical = Math.abs(sheetCloseCurrentY) > Math.abs(deltaX) * 1.3;
+                } else {
+                    return; // movimento troppo piccolo per decidere, aspetta il prossimo evento
+                }
+            }
+
+            if (!sheetCloseDirectionIsVertical) return; // è uno swipe laterale (cambio brano): non nostro
+
             if (sheetCloseCurrentY > 0) {
                 const height = nowPlayingSheet.offsetHeight || window.innerHeight;
                 const dragPercent = (sheetCloseCurrentY / height) * 100;
@@ -3124,6 +3152,10 @@
         function sheetCloseEnd() {
             if (!sheetCloseIsDragging) return;
             sheetCloseIsDragging = false;
+
+            // Se non era uno swipe verticale (era laterale, per il cambio brano), la
+            // sheet non è mai stata mossa: niente da ripristinare né da animare qui.
+            if (!sheetCloseDirectionIsVertical) return;
 
             nowPlayingSheet.style.transition = 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
 
@@ -3149,17 +3181,17 @@
             targets.forEach(el => {
                 el.addEventListener('touchstart', (e) => {
                     if (isInteractiveTarget(e.target)) return;
-                    sheetCloseStart(e.touches[0].clientY);
+                    sheetCloseStart(e.touches[0].clientX, e.touches[0].clientY);
                 }, { passive: true });
-                el.addEventListener('touchmove', (e) => sheetCloseMove(e.touches[0].clientY), { passive: true });
+                el.addEventListener('touchmove', (e) => sheetCloseMove(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
                 el.addEventListener('touchend', sheetCloseEnd, { passive: true });
 
                 el.addEventListener('mousedown', (e) => {
                     if (isInteractiveTarget(e.target)) return;
-                    sheetCloseStart(e.clientY);
+                    sheetCloseStart(e.clientX, e.clientY);
                 });
             });
-            window.addEventListener('mousemove', (e) => { if (sheetCloseIsDragging) sheetCloseMove(e.clientY); });
+            window.addEventListener('mousemove', (e) => { if (sheetCloseIsDragging) sheetCloseMove(e.clientX, e.clientY); });
             window.addEventListener('mouseup', sheetCloseEnd);
         }
 
@@ -3581,7 +3613,7 @@
 
         // Apre una playlist locale (cartella): rielenca i file, popola appState.tracks
         // e mostra la vista Risultati, esattamente come una playlist Spotify prima.
-        async function openLocalPlaylist(uri, name) {
+        async function openLocalPlaylist(uri, name, isRefresh) {
             try {
                 const folder = await SbixiFolderAccess.listFolder(uri);
                 const tracks = tracksFromFolderResult(folder);
@@ -3592,8 +3624,11 @@
                 currentLoadedTitle = name || folder.name || 'Playlist';
                 showResultsView(currentLoadedTitle);
                 renderTracklist(0);
+                updateRefreshPlaylistBtn(uri);
                 if (tracks.length === 0) {
                     showToast('Nessun file audio trovato in questa cartella (formati supportati: mp3, m4a, flac, wav, ogg, opus, aac, wma).');
+                } else if (isRefresh) {
+                    showToast('Playlist aggiornata: ' + tracks.length + ' brani.');
                 } else {
                     showToast(tracks.length + ' brani trovati.');
                 }
@@ -3676,10 +3711,11 @@
 
         // Mostra il pulsante di aggiornamento manuale nell'header solo quando è aperta una
         // playlist Spotify (permette di bypassare la cache se la playlist è stata modificata).
-        function updateRefreshPlaylistBtn(url) {
+        function updateRefreshPlaylistBtn(uri) {
             const btn = document.getElementById('refreshPlaylistBtn');
             if (!btn) return;
-            btn.classList.toggle('hidden', !url);
+            btn.dataset.folderUri = uri || '';
+            btn.classList.toggle('hidden', !uri);
         }
 
         // --- HOME: "Recenti" ---
@@ -3987,6 +4023,7 @@
                     currentListSource = 'local';
                     showResultsView(currentLoadedTitle);
                     renderTracklist(0);
+                    updateRefreshPlaylistBtn(uri);
                     return;
                 }
                 openLocalPlaylist(uri, item.name);
@@ -4022,10 +4059,10 @@
         // YouTube: la stessa canzone risentita non crea una seconda voce. Salviamo anche
         // la playlist di provenienza (se c'era): serve a riaprire il brano da "Canzoni"
         // in home mostrando la stessa etichetta "Riproduzione da Playlist" di sempre.
-        function addRecentTrack({ id, title, channel, thumbnail = null, spotifyImport = false, listType = null, listKey = null, listTitle = '' }) {
+        function addRecentTrack({ id, title, channel, thumbnail = null, path = null, spotifyImport = false, listType = null, listKey = null, listTitle = '' }) {
             if (!id || !title) return;
             let items = loadRecentTracks().filter(it => it.id !== id);
-            items.unshift({ id, title, channel, thumbnail, spotifyImport: !!spotifyImport, listType: listType || null, listKey: listKey || null, listTitle: listTitle || '', ts: Date.now() });
+            items.unshift({ id, title, channel, thumbnail, path, spotifyImport: !!spotifyImport, listType: listType || null, listKey: listKey || null, listTitle: listTitle || '', ts: Date.now() });
             items = items.slice(0, RECENT_TRACKS_MAX);
             saveRecentTracks(items);
             renderRecentTracksHome();
@@ -4058,7 +4095,7 @@
             col.innerHTML = items.map((it, i) => `
                 <div class="home-track-row${currentPlayingId && it.id === currentPlayingId ? ' playing' : ''}" data-index="${i}">
                     <div class="rounded-full overflow-hidden shrink-0 relative track-thumb-wrap" style="width:44px;height:44px;">
-                        <div style="width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg-input);${it.thumbnail ? `background-image:url('${it.thumbnail.replace(/'/g, "\\'")}')` : ''}"></div>
+                        <div id="recent-track-thumb-${i}" style="width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg-input);${it.thumbnail ? `background-image:url('${it.thumbnail.replace(/'/g, "\\'")}')` : ''}"></div>
                     </div>
                     <div class="home-track-meta">
                         <div class="t-title">${escapeHtml(it.title)}</div>
@@ -4069,6 +4106,18 @@
                     </button>
                 </div>
             `).join('');
+
+            // Copertina non ancora nota (brano locale, mai vista prima in questa
+            // sessione): recuperata al volo dal file, uguale a come già succede nella
+            // lista canzoni della playlist.
+            items.forEach((it, i) => {
+                if (it.thumbnail || !it.id) return;
+                getEmbeddedCoverForTrack({ id: it.id, title: it.title, path: it.path }).then((cover) => {
+                    if (!cover.url) return;
+                    const el = document.getElementById(`recent-track-thumb-${i}`);
+                    if (el) el.style.backgroundImage = `url('${cover.url.replace(/'/g, "\\'")}')`;
+                });
+            });
 
             const LONG_PRESS_MS = 500;
             col.querySelectorAll('.home-track-row').forEach(row => {
@@ -4742,7 +4791,7 @@
                 index: index
             });
 
-            addRecentTrack({ id: track.id, title: track.title, channel: track.channel, thumbnail: track.thumbnail || null, listType: nowPlayingListType, listKey: nowPlayingListKey, listTitle: nowPlayingListTitle });
+            addRecentTrack({ id: track.id, title: track.title, channel: track.channel, thumbnail: track.thumbnail || null, path: track.path || null, listType: nowPlayingListType, listKey: nowPlayingListKey, listTitle: nowPlayingListTitle });
         }
 
         // Ultimi metadata noti, tenuti qui per poterli reinviare al plugin nativo anche
@@ -4883,7 +4932,7 @@
                 // nel momento in cui l'utente lo fa davvero partire per la prima volta.
                 const t = nowPlayingTracks[nowPlayingIndex];
                 if (t && t.id) {
-                    addRecentTrack({ id: t.id, title: t.title, channel: t.channel, thumbnail: t.thumbnail || null, spotifyImport: !!t.spotifyImport, listType: nowPlayingListType, listKey: nowPlayingListKey, listTitle: nowPlayingListTitle });
+                    addRecentTrack({ id: t.id, title: t.title, channel: t.channel, thumbnail: t.thumbnail || null, path: t.path || null, spotifyImport: !!t.spotifyImport, listType: nowPlayingListType, listKey: nowPlayingListKey, listTitle: nowPlayingListTitle });
                 }
             }
         }
