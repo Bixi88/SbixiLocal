@@ -118,6 +118,7 @@
     <link rel="stylesheet" href="vendor/inter/inter.css">
     <script src="vendor/tailwind-browser.js"></script>
     <script src="folder-access.js"></script>
+    <script src="media-controls.js"></script>
     <link rel="stylesheet" href="vendor/fontawesome/all.min.css">
 
     <style>
@@ -2563,6 +2564,7 @@
                         const imgBytes = frameData.subarray(imgStart);
                         const blob = new Blob([imgBytes], { type: mimeType });
                         result.coverBlobUrl = URL.createObjectURL(blob);
+                        result.coverBase64 = bytesToBase64(imgBytes);
                     } catch (err) { /* copertina malformata: si ignora, resta il placeholder */ }
                 }
                 offset = dataEnd;
@@ -2570,14 +2572,27 @@
             return result;
         }
 
+        // Converte byte grezzi in base64 a blocchi: farlo in un colpo solo con
+        // String.fromCharCode(...bytes) su immagini di qualche centinaio di KB può
+        // superare il limite di argomenti della funzione ed è comunque più lento.
+        function bytesToBase64(bytes) {
+            const CHUNK = 8192;
+            let binary = '';
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+            }
+            return btoa(binary);
+        }
+
         // Legge la copertina incorporata di un brano (solo mp3 per ora), con cache in
         // memoria per non rileggere/riparsare lo stesso file più volte nella sessione.
         // Usa track.path (nome file originale, con estensione) per capire il formato:
         // track.title ne è già privo (vedi titleFromFilename), quindi non va bene per
-        // questo controllo.
+        // questo controllo. Ritorna { url, base64 } (entrambi null se non trovata):
+        // url per <img>, base64 per la notifica media nativa (vedi SbixiMediaControls).
         async function getEmbeddedCoverForTrack(track) {
             if (localArtworkCache.has(track.id)) return localArtworkCache.get(track.id);
-            let url = null;
+            let result = { url: null, base64: null };
             const filename = track.path || track.title || '';
             if (/\.mp3$/i.test(filename)) {
                 try {
@@ -2586,18 +2601,21 @@
                     const bytes = new Uint8Array(bin.length);
                     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
                     const meta = parseId3(bytes);
-                    if (meta.coverBlobUrl) url = meta.coverBlobUrl;
+                    if (meta.coverBlobUrl) {
+                        result.url = meta.coverBlobUrl;
+                        result.base64 = meta.coverBase64;
+                    }
                 } catch (err) { /* niente copertina incorporata leggibile: resta il placeholder */ }
             }
-            localArtworkCache.set(track.id, url);
-            return url;
+            localArtworkCache.set(track.id, result);
+            return result;
         }
 
         // Applica copertina (e, se ricavabile, titolo/artista migliori) a sheetImg/miniImg.
         // Copertina incorporata (solo mp3 per ora) -> altrimenti icona generica.
         async function displayLocalArtwork(sheetImg, miniImg, track) {
-            const url = await getEmbeddedCoverForTrack(track);
-            const finalUrl = url || FALLBACK_ARTWORK;
+            const cover = await getEmbeddedCoverForTrack(track);
+            const finalUrl = cover.url || FALLBACK_ARTWORK;
             if (sheetImg) sheetImg.src = finalUrl;
             if (miniImg) miniImg.src = finalUrl;
             return finalUrl;
@@ -3555,8 +3573,8 @@
         async function findFirstCoverInFolder(tracks) {
             const candidates = tracks.slice(0, 15);
             for (const t of candidates) {
-                const url = await getEmbeddedCoverForTrack(t);
-                if (url) return url;
+                const cover = await getEmbeddedCoverForTrack(t);
+                if (cover.url) return cover.url;
             }
             return null;
         }
@@ -4727,30 +4745,59 @@
             addRecentTrack({ id: track.id, title: track.title, channel: track.channel, thumbnail: track.thumbnail || null, listType: nowPlayingListType, listKey: nowPlayingListKey, listTitle: nowPlayingListTitle });
         }
 
-        function updateMediaSessionMetadata(track) {
+        // Ultimi metadata noti, tenuti qui per poterli reinviare al plugin nativo anche
+        // dai punti (stato/posizione) che non hanno il track a portata di mano.
+        let currentNativeMeta = { title: 'SbixiLocal', artist: '' };
+        let lastNativePushAt = 0;
+
+        // Invia lo stato corrente alla notifica media nativa (copertina, titolo,
+        // tasti, minutaggio). "immediate" salta la limitazione di frequenza, usata
+        // per i cambi di stato veri (nuovo brano, play/pausa) - la posizione durante
+        // la normale riproduzione invece non ha bisogno di un aggiornamento continuo:
+        // Android stesso interpola la barra tra un aggiornamento e l'altro.
+        function pushNativeNowPlaying(immediate) {
+            const now = Date.now();
+            if (!immediate && now - lastNativePushAt < 4000) return;
+            lastNativePushAt = now;
+
+            const durationMs = (player?.getDuration ? player.getDuration() : 0) * 1000;
+            const positionMs = (player?.getCurrentTime ? player.getCurrentTime() : 0) * 1000;
+            SbixiMediaControls.update({
+                title: currentNativeMeta.title,
+                artist: currentNativeMeta.artist,
+                artworkBase64: currentNativeMeta.artworkBase64 || null,
+                isPlaying: !!appState.isPlaying,
+                durationMs: isFinite(durationMs) ? Math.round(durationMs) : 0,
+                positionMs: isFinite(positionMs) ? Math.round(positionMs) : 0
+            });
+        }
+
+        async function updateMediaSessionMetadata(track) {
+            currentNativeMeta = { title: track.title, artist: track.channel, artworkBase64: null };
+
             if ('mediaSession' in navigator) {
-                // Più risoluzioni = artwork più nitido nei controlli di sistema (notifica, lock screen,
-                // pannello rapido Android): è lì che Android disegna quello che sembra un "widget", perché
-                // un vero home-screen widget non è realizzabile da una webapp/PWA, richiede codice nativo.
-                // Per i brani importati da Spotify usiamo track.thumbnail (Deezer/iTunes se
-                // trovata, altrimenti la YouTube risolta) anche qui: stessa immagine
-                // ovunque, niente cambio a sorpresa nel lock screen.
-                const artwork = (track.spotifyImport && track.thumbnail)
-                    ? [{ src: track.thumbnail, sizes: '400x400', type: 'image/jpeg' }]
-                    : [
-                        { src: `https://img.youtube.com/vi/${track.id}/mqdefault.jpg`, sizes: '320x180', type: 'image/jpeg' },
-                        { src: `https://img.youtube.com/vi/${track.id}/hqdefault.jpg`, sizes: '480x360', type: 'image/jpeg' },
-                        { src: `https://img.youtube.com/vi/${track.id}/sddefault.jpg`, sizes: '640x480', type: 'image/jpeg' }
-                    ];
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: track.title, artist: track.channel, album: 'SBIXIFY',
-                    artwork: artwork
-                });
+                try {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: track.title, artist: track.channel, album: 'SbixiLocal'
+                    });
+                } catch (e) {}
             }
+
+            // Copertina: arriva un istante dopo (serve leggerla dal file), la notifica
+            // parte comunque subito con titolo/artista e si aggiorna quando è pronta.
+            pushNativeNowPlaying(true);
+            try {
+                const cover = await getEmbeddedCoverForTrack(track);
+                if (currentNativeMeta.title === track.title && currentNativeMeta.artist === track.channel) {
+                    currentNativeMeta.artworkBase64 = cover.base64 || null;
+                    pushNativeNowPlaying(true);
+                }
+            } catch (e) {}
         }
 
         function updateMediaSessionState(isPlaying) {
             if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+            pushNativeNowPlaying(true);
         }
 
         // Il minutaggio nella notifica/lockscreen di Android non arriva "gratis" solo
@@ -4759,18 +4806,20 @@
         // segnalato). playbackRate 0 da fermo evita che Android continui ad "estrapolare"
         // in avanti la posizione come se stesse ancora scorrendo mentre è in pausa.
         function updateMediaSessionPosition() {
-            if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
-            if (!player?.getDuration) return;
-            const duration = player.getDuration();
-            if (!duration || !isFinite(duration) || duration <= 0) return;
-            const position = Math.min(player.getCurrentTime ? player.getCurrentTime() : 0, duration);
-            try {
-                navigator.mediaSession.setPositionState({
-                    duration,
-                    position,
-                    playbackRate: appState.isPlaying ? 1 : 0
-                });
-            } catch (e) {}
+            if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && player?.getDuration) {
+                const duration = player.getDuration();
+                if (duration && isFinite(duration) && duration > 0) {
+                    const position = Math.min(player.getCurrentTime ? player.getCurrentTime() : 0, duration);
+                    try {
+                        navigator.mediaSession.setPositionState({
+                            duration,
+                            position,
+                            playbackRate: appState.isPlaying ? 1 : 0
+                        });
+                    } catch (e) {}
+                }
+            }
+            pushNativeNowPlaying(false);
         }
 
         function setupMediaSessionHandlers() {
@@ -4780,6 +4829,18 @@
                 navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
                 navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
             }
+
+            // Stessi comandi, ma dalla notifica/cuffie/auto reali (Android), non dalla
+            // sola pagina web: senza questo i tasti della notifica non farebbero nulla.
+            SbixiMediaControls.on('play', () => { if (!appState.isPlaying) togglePlay(); });
+            SbixiMediaControls.on('pause', () => { if (appState.isPlaying) togglePlay(); });
+            SbixiMediaControls.on('next', () => nextTrack());
+            SbixiMediaControls.on('prev', () => prevTrack());
+            SbixiMediaControls.on('seek', (data) => {
+                if (player?.seekTo && data && typeof data.positionMs === 'number') {
+                    player.seekTo(data.positionMs / 1000);
+                }
+            });
         }
 
         let lastKnownPlayingState = null; // evita di ri-animare l'icona quando YouTube ri-emette
