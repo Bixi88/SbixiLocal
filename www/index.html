@@ -868,7 +868,7 @@
            da pseudo-elementi propri (vedi .home-header::before/::after qui sotto). */
         .home-header {
             position: sticky; top: 0; z-index: 25;
-            padding: 4px 6px 0;
+            padding: calc(env(safe-area-inset-top, 0px) + 4px) 6px 0;
             /* Vedi nota sul compositing più sopra: layer esplicito e stabile, mai
                "squashato" insieme ai vicini, così #nowPlayingSheet (altro layer
                esplicito, più in alto) lo copre sempre in modo corretto e prevedibile. */
@@ -2426,27 +2426,26 @@
             const audio = new Audio();
             audio.preload = 'auto';
             let currentVideoId = null;
-            let currentBlobUrl = null;
             let loadToken = 0;
-
-            function revokeCurrentBlob() {
-                if (currentBlobUrl) { try { URL.revokeObjectURL(currentBlobUrl); } catch (e) {} currentBlobUrl = null; }
-            }
 
             audio.addEventListener('playing', () => onStateChange({ data: YT.PlayerState.PLAYING }));
             audio.addEventListener('pause', () => { if (!audio.ended) onStateChange({ data: YT.PlayerState.PAUSED }); });
             audio.addEventListener('ended', () => onStateChange({ data: YT.PlayerState.ENDED }));
             audio.addEventListener('waiting', () => onStateChange({ data: YT.PlayerState.BUFFERING }));
 
+            // Copia il file lato nativo (I/O puro, non tocca il thread JS) e lo fa
+            // leggere ad <audio> tramite Capacitor.convertFileSrc(): niente più byte
+            // audio travasati come stringa base64 dentro JavaScript (era il vero
+            // colpevole degli scatti durante i cambi di brano - decodificare anche
+            // solo 5-10MB di testo sul thread principale blocca ogni animazione in
+            // corso). In più supporta il seek reale via richieste HTTP Range.
             async function load(uri, autoplay) {
                 const myToken = ++loadToken;
                 currentVideoId = uri;
                 try {
-                    const { blobUrl } = await SbixiFolderAccess.readAudioAsBlobUrl(uri);
-                    if (myToken !== loadToken) { URL.revokeObjectURL(blobUrl); return; } // superato da un caricamento più recente
-                    revokeCurrentBlob();
-                    currentBlobUrl = blobUrl;
-                    audio.src = blobUrl;
+                    const { path } = await SbixiFolderAccess.copyToCache(uri);
+                    if (myToken !== loadToken) return; // superato da un caricamento più recente
+                    audio.src = window.Capacitor.convertFileSrc(path);
                     if (autoplay) audio.play().catch(() => {});
                 } catch (err) {
                     console.warn('Impossibile leggere il file audio:', err);
@@ -2582,7 +2581,7 @@
             const filename = track.path || track.title || '';
             if (/\.mp3$/i.test(filename)) {
                 try {
-                    const res = await SbixiFolderAccess.readFileRaw(track.id);
+                    const res = await SbixiFolderAccess.readFileRaw(track.id, 3 * 1024 * 1024);
                     const bin = atob(res.data);
                     const bytes = new Uint8Array(bin.length);
                     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -3120,19 +3119,25 @@
         }
 
         function setupSheetCloseSwipe() {
-            const header = document.getElementById('sheetHeaderDrag');
-            const targets = [sheetSwipeCloseArea, header].filter(Boolean);
+            // Prima erano solo #sheetSwipeCloseArea e l'header a intercettare lo swipe
+            // verso il basso: capitava di toccare un punto "cieco" e il gesto non
+            // partiva. Ora ascoltiamo su tutta la sheet, escludendo solo i controlli
+            // veri e propri (pulsanti, slider, barra di avanzamento) che hanno già una
+            // loro gestione del tocco.
+            const targets = [nowPlayingSheet];
+            const isInteractiveTarget = (el) =>
+                el.closest('button, input[type="range"], #progressBarContainer, #volumeSlider');
 
             targets.forEach(el => {
                 el.addEventListener('touchstart', (e) => {
-                    if (e.target.closest('button')) return;
+                    if (isInteractiveTarget(e.target)) return;
                     sheetCloseStart(e.touches[0].clientY);
                 }, { passive: true });
                 el.addEventListener('touchmove', (e) => sheetCloseMove(e.touches[0].clientY), { passive: true });
                 el.addEventListener('touchend', sheetCloseEnd, { passive: true });
 
                 el.addEventListener('mousedown', (e) => {
-                    if (e.target.closest('button')) return;
+                    if (isInteractiveTarget(e.target)) return;
                     sheetCloseStart(e.clientY);
                 });
             });
