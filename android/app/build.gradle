@@ -1,6 +1,13 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+// Numero di build passato da GitHub Actions (numero della run): garantisce che ogni
+// APK abbia un versionCode più alto del precedente, così Android lo installa come
+// aggiornamento invece di trattarlo da un'altra app (e perdere i permessi cartelle
+// già dati). In locale, senza quella variabile d'ambiente, resta 1.
+def sbixiVersionCode = (System.getenv("SBIXILOCAL_VERSION_CODE") ?: "1") as Integer
+def sbixiVersionName = "1." + (System.getenv("SBIXILOCAL_VERSION_CODE") ?: "0")
+
 android {
     namespace = "com.bixi.sbixifylocal"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -8,8 +15,8 @@ android {
         applicationId "com.bixi.sbixifylocal"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode (System.getenv("SBIXILOCAL_VERSION_CODE") ?: "1").toInteger()
-        versionName "1." + (System.getenv("SBIXILOCAL_VERSION_CODE") ?: "0")
+        versionCode sbixiVersionCode
+        versionName sbixiVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
