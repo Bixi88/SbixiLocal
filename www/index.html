@@ -3599,16 +3599,36 @@
             }));
         }
 
-        // Usata come icona della playlist in home: prova i primi brani della cartella
-        // (max 15, per non dover leggere librerie intere) finché non trova una copertina
+        // Usata come icona della playlist in home: prova i brani della cartella (max 50,
+        // per non dover leggere librerie enormi) finché non trova una copertina
         // incorporata. Nessuna chiamata online: solo lettura locale dei file già elencati.
         async function findFirstCoverInFolder(tracks) {
-            const candidates = tracks.slice(0, 15);
+            const candidates = tracks.slice(0, 50);
             for (const t of candidates) {
                 const cover = await getEmbeddedCoverForTrack(t);
                 if (cover.url) return cover.url;
             }
             return null;
+        }
+
+        // Cerca (o ricerca, con force=true anche se già tentato prima) la copertina di
+        // una playlist locale e la salva nell'elenco "Recenti" in home. Condivisa fra il
+        // primo aggiunta cartella, il riempimento automatico e il pulsante di refresh.
+        async function refreshFolderCoverArt(uri, tracks, force) {
+            const key = 'folder:' + uri;
+            if (!force && foldersCoverAttempted.has(key)) return;
+            foldersCoverAttempted.add(key);
+
+            const cover = await findFirstCoverInFolder(tracks);
+            if (!cover) return;
+
+            const items = loadRecentItems();
+            const idx = items.findIndex(it => it.url === key);
+            if (idx !== -1) {
+                items[idx].artwork = cover;
+                saveRecentItems(items);
+                renderRecentHome();
+            }
         }
 
         // Apre una playlist locale (cartella): rielenca i file, popola appState.tracks
@@ -3632,6 +3652,11 @@
                 } else {
                     showToast(tracks.length + ' brani trovati.');
                 }
+                // Il refresh manuale (tasto in alto) è anche l'occasione per ritentare la
+                // copertina della playlist se ancora mancante: prima non veniva mai
+                // ritoccata dopo il primo tentativo (fallito magari solo perché i brani
+                // con copertina stavano oltre il limite di scansione di allora).
+                refreshFolderCoverArt(uri, tracks, !!isRefresh);
             } catch (err) {
                 showToast('Impossibile aprire questa cartella: ' + (err && err.message ? err.message : 'errore sconosciuto'));
             }
