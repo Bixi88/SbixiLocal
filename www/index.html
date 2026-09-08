@@ -3608,11 +3608,43 @@
         // Usata come icona della playlist in home: prova i brani della cartella (max 50,
         // per non dover leggere librerie enormi) finché non trova una copertina
         // incorporata. Nessuna chiamata online: solo lettura locale dei file già elencati.
+        // Ridimensiona/comprime un'immagine (data URL) prima di salvarla stabilmente:
+        // una copertina incorporata può pesare anche mezzo mega, che come testo base64
+        // diventa ancora più grande - moltiplicato per diverse playlist rischiava di
+        // riempire lo spazio di salvataggio del telefono e far fallire il salvataggio
+        // in silenzio (nessun errore visibile, semplicemente non veniva scritto).
+        // 200x200 a qualità 0.72 basta ampiamente per un'icona di playlist.
+        function downscaleImageForStorage(sourceDataUrl, maxSize) {
+            return new Promise((resolve) => {
+                try {
+                    const img = new Image();
+                    img.onload = () => {
+                        try {
+                            let { width, height } = img;
+                            if (width >= height) {
+                                if (width > maxSize) { height = Math.round(height * maxSize / width); width = maxSize; }
+                            } else {
+                                if (height > maxSize) { width = Math.round(width * maxSize / height); height = maxSize; }
+                            }
+                            const canvas = document.createElement('canvas');
+                            canvas.width = width;
+                            canvas.height = height;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, width, height);
+                            resolve(canvas.toDataURL('image/jpeg', 0.72));
+                        } catch (err) { resolve(sourceDataUrl); }
+                    };
+                    img.onerror = () => resolve(sourceDataUrl);
+                    img.src = sourceDataUrl;
+                } catch (err) { resolve(sourceDataUrl); }
+            });
+        }
+
         async function findFirstCoverInFolder(tracks) {
             const candidates = tracks.slice(0, 50);
             for (const t of candidates) {
                 const cover = await getEmbeddedCoverForTrack(t);
-                if (cover.dataUrl) return cover.dataUrl;
+                if (cover.dataUrl) return await downscaleImageForStorage(cover.dataUrl, 200);
             }
             return null;
         }
@@ -3776,6 +3808,7 @@
                 localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(items));
             } catch (err) {
                 console.warn('Impossibile salvare le ricerche recenti:', err);
+                showToast('Salvataggio non riuscito (spazio esaurito?).');
             }
         }
 
