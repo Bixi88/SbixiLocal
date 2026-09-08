@@ -3640,13 +3640,38 @@
             });
         }
 
-        async function findFirstCoverInFolder(tracks) {
+        // Raccoglie fino a "limit" copertine diverse trovate nella cartella (max 50
+        // brani controllati, per non dover leggere librerie enormi). Nessuna chiamata
+        // online: solo lettura locale dei file già elencati.
+        async function findCoversInFolder(tracks, limit) {
             const candidates = tracks.slice(0, 50);
+            const covers = [];
             for (const t of candidates) {
                 const cover = await getEmbeddedCoverForTrack(t);
-                if (cover.dataUrl) return await downscaleImageForStorage(cover.dataUrl, 200);
+                if (cover.dataUrl) {
+                    covers.push(cover.dataUrl);
+                    if (covers.length >= limit) break;
+                }
             }
-            return null;
+            return covers;
+        }
+
+        // Sceglie la copertina da usare come icona della playlist, A ROTAZIONE fra
+        // quelle trovate (non sempre la prima): ogni volta che questa funzione viene
+        // richiamata per la stessa playlist (refresh manuale, o riapertura dell'app -
+        // vedi foldersCoverAttempted, che si azzera a ogni avvio) sceglie quella
+        // successiva nell'elenco, tornando alla prima dopo l'ultima. Ritorna già
+        // ridimensionata, pronta per essere salvata. null se non ne trova nessuna.
+        async function pickPlaylistCoverArt(key, tracks) {
+            const covers = await findCoversInFolder(tracks, 10);
+            if (covers.length === 0) return null;
+
+            const items = loadRecentItems();
+            const idx = items.findIndex(it => it.url === key);
+            const rotation = idx !== -1 ? (items[idx].artworkRotation || 0) + 1 : 0;
+            const picked = covers[rotation % covers.length];
+
+            return { url: await downscaleImageForStorage(picked, 200), rotation };
         }
 
         // Cerca (o ricerca, con force=true anche se già tentato prima) la copertina di
@@ -3657,13 +3682,14 @@
             if (!force && foldersCoverAttempted.has(key)) return;
             foldersCoverAttempted.add(key);
 
-            const cover = await findFirstCoverInFolder(tracks);
-            if (!cover) return;
+            const result = await pickPlaylistCoverArt(key, tracks);
+            if (!result) return;
 
             const items = loadRecentItems();
             const idx = items.findIndex(it => it.url === key);
             if (idx !== -1) {
-                items[idx].artwork = cover;
+                items[idx].artwork = result.url;
+                items[idx].artworkRotation = result.rotation;
                 saveRecentItems(items);
                 renderRecentHome();
             }
@@ -3901,12 +3927,13 @@
                 renderLocalPlaylistsInSettings();
                 showToast('Cartella aggiunta: ' + folder.name);
 
-                const cover = await findFirstCoverInFolder(tracksFromFolderResult(folder));
-                if (cover) {
+                const result = await pickPlaylistCoverArt(key, tracksFromFolderResult(folder));
+                if (result) {
                     const items = loadRecentItems();
                     const idx = items.findIndex(it => it.url === key);
                     if (idx !== -1) {
-                        items[idx].artwork = cover;
+                        items[idx].artwork = result.url;
+                        items[idx].artworkRotation = result.rotation;
                         saveRecentItems(items);
                         renderRecentHome();
                     }
@@ -3954,13 +3981,14 @@
 
                 const uri = it.url.slice('folder:'.length);
                 SbixiFolderAccess.listFolder(uri).then((folder) => {
-                    return findFirstCoverInFolder(tracksFromFolderResult(folder));
-                }).then((cover) => {
-                    if (!cover) return;
+                    return pickPlaylistCoverArt(it.url, tracksFromFolderResult(folder));
+                }).then((result) => {
+                    if (!result) return;
                     const current = loadRecentItems();
                     const idx = current.findIndex(x => x.url === it.url);
                     if (idx !== -1 && !current[idx].artwork) {
-                        current[idx].artwork = cover;
+                        current[idx].artwork = result.url;
+                        current[idx].artworkRotation = result.rotation;
                         saveRecentItems(current);
                         renderRecentHome();
                     }
