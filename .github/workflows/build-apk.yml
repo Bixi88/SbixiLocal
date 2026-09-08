@@ -44,7 +44,6 @@ jobs:
           SBIXILOCAL_KEYSTORE_PASSWORD: ${{ secrets.SBIXILOCAL_KEYSTORE_PASSWORD }}
           SBIXILOCAL_KEY_ALIAS: ${{ secrets.SBIXILOCAL_KEY_ALIAS }}
           SBIXILOCAL_KEY_PASSWORD: ${{ secrets.SBIXILOCAL_KEY_PASSWORD }}
-          SBIXILOCAL_VERSION_CODE: ${{ github.run_number }}
         run: |
           cd android
           chmod +x ./gradlew
@@ -72,4 +71,4 @@ jobs:
           name: SbixiLocal build ${{ github.run_number }}
           files: out/SbixiLocal-latest.apk
         env:
-          GITHUB_TOKEN: ${{ secrets.GIT HUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
