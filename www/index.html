@@ -2565,6 +2565,7 @@
                         const blob = new Blob([imgBytes], { type: mimeType });
                         result.coverBlobUrl = URL.createObjectURL(blob);
                         result.coverBase64 = bytesToBase64(imgBytes);
+                        result.coverMimeType = mimeType;
                     } catch (err) { /* copertina malformata: si ignora, resta il placeholder */ }
                 }
                 offset = dataEnd;
@@ -2588,11 +2589,14 @@
         // memoria per non rileggere/riparsare lo stesso file più volte nella sessione.
         // Usa track.path (nome file originale, con estensione) per capire il formato:
         // track.title ne è già privo (vedi titleFromFilename), quindi non va bene per
-        // questo controllo. Ritorna { url, base64 } (entrambi null se non trovata):
-        // url per <img>, base64 per la notifica media nativa (vedi SbixiMediaControls).
+        // questo controllo. Ritorna { url, dataUrl, base64, mimeType } (tutti null se
+        // non trovata): url (blob, solo per questa sessione) per gli <img> a schermo,
+        // dataUrl (permanente, autosufficiente) per tutto ciò che va salvato in
+        // localStorage - un blob url salvato lì non funziona più alla riapertura
+        // dell'app, un data url sì.
         async function getEmbeddedCoverForTrack(track) {
             if (localArtworkCache.has(track.id)) return localArtworkCache.get(track.id);
-            let result = { url: null, base64: null };
+            let result = { url: null, dataUrl: null, base64: null, mimeType: null };
             const filename = track.path || track.title || '';
             if (/\.mp3$/i.test(filename)) {
                 try {
@@ -2604,6 +2608,8 @@
                     if (meta.coverBlobUrl) {
                         result.url = meta.coverBlobUrl;
                         result.base64 = meta.coverBase64;
+                        result.mimeType = meta.coverMimeType || 'image/jpeg';
+                        result.dataUrl = `data:${result.mimeType};base64,${result.base64}`;
                     }
                 } catch (err) { /* niente copertina incorporata leggibile: resta il placeholder */ }
             }
@@ -3606,7 +3612,7 @@
             const candidates = tracks.slice(0, 50);
             for (const t of candidates) {
                 const cover = await getEmbeddedCoverForTrack(t);
-                if (cover.url) return cover.url;
+                if (cover.dataUrl) return cover.dataUrl;
             }
             return null;
         }
