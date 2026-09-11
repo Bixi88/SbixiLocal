@@ -3908,10 +3908,18 @@
             renderLocalPlaylistsInSettings();
         }
         function closeApiModal() {
-            const modal = document.getElementById('apiModal');
-            if (modal) modal.classList.remove('active');
+            // Come closeNowPlayingSheet()/closeSleepTimerModal(): se in cima allo stack
+            // c'è lo stato 'modal', lasciamo che sia il gestore di popstate a togliere la
+            // classe 'active', consumando quello stato con un back invece di rimuoverlo
+            // "a mano" qui. Farlo qui E anche chiamare back() lasciava la history con uno
+            // stato 'main' di troppo (il popstate, non trovando più il modal aperto, non
+            // capiva cosa stesse chiudendo e mostrava per errore "tocca di nuovo per
+            // uscire", oltre a sfalsare di un livello tutti i back successivi).
             if (window.history.state && window.history.state.page === 'modal') {
                 window.history.back();
+            } else {
+                const modal = document.getElementById('apiModal');
+                if (modal) modal.classList.remove('active');
             }
         }
         function saveSettingsFromModal() {
