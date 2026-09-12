@@ -2746,6 +2746,21 @@
             restoreLastPlayback();
             updateRepeatButtonUI();
 
+            // Il tasto/gesto "indietro" di Android non è collegato di default alla
+            // cronologia della pagina web: senza questo, ogni back di sistema
+            // ignorava del tutto la nostra gestione (sheet, playlist, "tocca di nuovo
+            // per uscire") e faceva chiudere l'app direttamente.
+            const CapApp = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+            if (CapApp) {
+                CapApp.addListener('backButton', ({ canGoBack }) => {
+                    if (canGoBack) {
+                        window.history.back();
+                    } else {
+                        CapApp.exitApp();
+                    }
+                });
+            }
+
             document.body.classList.remove('hidden');
             window.history.replaceState({ page: 'main' }, 'Main');
             // Stato "cuscinetto" extra: senza questo, con una sola entry nello history,
@@ -2803,6 +2818,8 @@
                 if (!handled && !(viewsSlider && viewsSlider.classList.contains('showing-results'))) {
                     if (exitOnBackArmed) {
                         clearTimeout(exitOnBackArmedTimeout);
+                        const CapApp = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+                        if (CapApp) CapApp.exitApp();
                         return;
                     }
                     exitOnBackArmed = true;
