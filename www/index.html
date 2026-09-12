@@ -4185,7 +4185,9 @@
             renderRecentTracksHome();
         }
 
-        function renderRecentTracksHome() {
+        let recentTracksRenderToken = 0;
+
+        async function renderRecentTracksHome() {
             const section = document.getElementById('recentTracksSection');
             const col = document.getElementById('recentTracksCol');
             if (!section || !col) return;
@@ -4198,6 +4200,23 @@
                 return;
             }
 
+            // Risolve TUTTE le copertine mancanti in parallelo prima di disegnare
+            // qualunque riga, invece di mostrarle vuote e riempirle una alla volta via
+            // via che ciascuna finisce di caricare: quell'effetto "a scatti" era proprio
+            // quello segnalato, visibile soprattutto all'apertura dell'app.
+            const myToken = ++recentTracksRenderToken;
+            const resolvedThumbnails = await Promise.all(items.map(async (it) => {
+                if (it.thumbnail || !it.id) return it.thumbnail || null;
+                try {
+                    const cover = await getEmbeddedCoverForTrack({ id: it.id, title: it.title, path: it.path });
+                    return cover.url || null;
+                } catch (err) { return null; }
+            }));
+            // Nel frattempo è arrivata una chiamata più recente (es. un altro brano
+            // appena ascoltato ha rimescolato l'ordine): la sua versione vince, questa
+            // si ferma qui invece di sovrascrivere il DOM con dati ormai vecchi.
+            if (myToken !== recentTracksRenderToken) return;
+
             section.classList.remove('hidden');
             // Riga del brano attualmente in ascolto: la classe "playing" viene ancora
             // aggiunta qui per completezza/uso futuro, ma in skin Immersive non ha più
@@ -4209,10 +4228,12 @@
             const currentPlayingId = (typeof nowPlayingIndex !== 'undefined' && nowPlayingTracks[nowPlayingIndex])
                 ? nowPlayingTracks[nowPlayingIndex].id
                 : null;
-            col.innerHTML = items.map((it, i) => `
+            col.innerHTML = items.map((it, i) => {
+                const thumb = resolvedThumbnails[i];
+                return `
                 <div class="home-track-row${currentPlayingId && it.id === currentPlayingId ? ' playing' : ''}" data-index="${i}">
                     <div class="rounded-full overflow-hidden shrink-0 relative track-thumb-wrap" style="width:44px;height:44px;">
-                        <div id="recent-track-thumb-${i}" style="width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg-input);${it.thumbnail ? `background-image:url('${it.thumbnail.replace(/'/g, "\\'")}')` : ''}"></div>
+                        <div style="width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg-input);${thumb ? `background-image:url('${thumb.replace(/'/g, "\\'")}')` : ''}"></div>
                     </div>
                     <div class="home-track-meta">
                         <div class="t-title">${escapeHtml(it.title)}</div>
@@ -4222,19 +4243,8 @@
                         <i class="fa-solid fa-xmark"></i>
                     </button>
                 </div>
-            `).join('');
-
-            // Copertina non ancora nota (brano locale, mai vista prima in questa
-            // sessione): recuperata al volo dal file, uguale a come già succede nella
-            // lista canzoni della playlist.
-            items.forEach((it, i) => {
-                if (it.thumbnail || !it.id) return;
-                getEmbeddedCoverForTrack({ id: it.id, title: it.title, path: it.path }).then((cover) => {
-                    if (!cover.url) return;
-                    const el = document.getElementById(`recent-track-thumb-${i}`);
-                    if (el) el.style.backgroundImage = `url('${cover.url.replace(/'/g, "\\'")}')`;
-                });
-            });
+            `;
+            }).join('');
 
             const LONG_PRESS_MS = 500;
             col.querySelectorAll('.home-track-row').forEach(row => {
