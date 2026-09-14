@@ -2585,7 +2585,54 @@
             return btoa(binary);
         }
 
-        // Legge la copertina incorporata di un brano (solo mp3 per ora), con cache in
+        // Legge il blocco METADATA_BLOCK_PICTURE di un file FLAC (formato di tag
+        // completamente diverso da ID3v2/mp3): dopo la firma "fLaC", una sequenza di
+        // blocchi ciascuno con un header di 4 byte (1 bit "ultimo blocco?" + 7 bit tipo,
+        // poi 3 byte di lunghezza) - il tipo 6 è la copertina. Tutti i campi numerici
+        // dentro il blocco PICTURE sono big-endian (a differenza del blocco
+        // VORBIS_COMMENT, che eredita il little-endian da Ogg Vorbis, ma qui non ci
+        // interessa: vogliamo solo la copertina, non titolo/artista).
+        function parseFlacPicture(bytes) {
+            const result = { coverBlobUrl: null, coverBase64: null, coverMimeType: null };
+            if (bytes.length < 4 || bytes[0] !== 0x66 || bytes[1] !== 0x4C || bytes[2] !== 0x61 || bytes[3] !== 0x43) {
+                return result; // manca la firma "fLaC" in testa al file
+            }
+            let offset = 4;
+            while (offset + 4 <= bytes.length) {
+                const header = bytes[offset];
+                const isLast = (header & 0x80) !== 0;
+                const blockType = header & 0x7f;
+                const blockLength = (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
+                const blockStart = offset + 4;
+                const blockEnd = blockStart + blockLength;
+                if (blockEnd > bytes.length) break; // dati incompleti (limite di lettura raggiunto)
+
+                if (blockType === 6) { // PICTURE
+                    try {
+                        const dv = new DataView(bytes.buffer, bytes.byteOffset + blockStart, blockLength);
+                        let p = 4; // salta "picture type" (4 byte), non ci serve
+                        const mimeLen = dv.getUint32(p); p += 4;
+                        const mimeType = new TextDecoder('iso-8859-1').decode(bytes.subarray(blockStart + p, blockStart + p + mimeLen)) || 'image/jpeg';
+                        p += mimeLen;
+                        const descLen = dv.getUint32(p); p += 4 + descLen; // descrizione, non ci serve
+                        p += 4 + 4 + 4 + 4; // width, height, color depth, colori indicizzati
+                        const dataLen = dv.getUint32(p); p += 4;
+                        const imgBytes = bytes.subarray(blockStart + p, blockStart + p + dataLen);
+                        const blob = new Blob([imgBytes], { type: mimeType });
+                        result.coverBlobUrl = URL.createObjectURL(blob);
+                        result.coverBase64 = bytesToBase64(imgBytes);
+                        result.coverMimeType = mimeType;
+                    } catch (err) { /* blocco PICTURE malformato: si ignora, resta il placeholder */ }
+                    break;
+                }
+
+                offset = blockEnd;
+                if (isLast) break;
+            }
+            return result;
+        }
+
+        // Legge la copertina incorporata di un brano (mp3 e flac per ora), con cache in
         // memoria per non rileggere/riparsare lo stesso file più volte nella sessione.
         // Usa track.path (nome file originale, con estensione) per capire il formato:
         // track.title ne è già privo (vedi titleFromFilename), quindi non va bene per
@@ -2598,13 +2645,15 @@
             if (localArtworkCache.has(track.id)) return localArtworkCache.get(track.id);
             let result = { url: null, dataUrl: null, base64: null, mimeType: null };
             const filename = track.path || track.title || '';
-            if (/\.mp3$/i.test(filename)) {
+            const isMp3 = /\.mp3$/i.test(filename);
+            const isFlac = /\.flac$/i.test(filename);
+            if (isMp3 || isFlac) {
                 try {
                     const res = await SbixiFolderAccess.readFileRaw(track.id, 3 * 1024 * 1024);
                     const bin = atob(res.data);
                     const bytes = new Uint8Array(bin.length);
                     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                    const meta = parseId3(bytes);
+                    const meta = isMp3 ? parseId3(bytes) : parseFlacPicture(bytes);
                     if (meta.coverBlobUrl) {
                         result.url = meta.coverBlobUrl;
                         result.base64 = meta.coverBase64;
@@ -2618,7 +2667,7 @@
         }
 
         // Applica copertina (e, se ricavabile, titolo/artista migliori) a sheetImg/miniImg.
-        // Copertina incorporata (solo mp3 per ora) -> altrimenti icona generica.
+        // Copertina incorporata (mp3/flac) -> altrimenti icona generica.
         async function displayLocalArtwork(sheetImg, miniImg, track) {
             const cover = await getEmbeddedCoverForTrack(track);
             const finalUrl = cover.url || FALLBACK_ARTWORK;
