@@ -115,8 +115,19 @@
          (Fontshare) non ha un pacchetto offline equivalente pronto: la tipografia
          Immersive ripiega sullo stack di sistema (vedi font-family più sotto) finché
          non forniamo eventuali file .woff2 della licenza già acquisita. -->
+    <!-- Font Inter precaricati: con la splash nativa ancora visibile sono già pronti al
+         primo frame, quindi niente "salto" da font di sistema a Inter. -->
+    <link rel="preload" href="vendor/inter/files/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="vendor/inter/files/inter-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="vendor/inter/files/inter-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="vendor/inter/files/inter-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="vendor/inter/inter.css">
-    <script src="vendor/tailwind-browser.js"></script>
+    <!-- Tailwind PRECOMPILATO in fase di build (npm run build:css, vedi workflow): CSS statico,
+         applicato al primo paint, senza compilatore JS da 280 KB né MutationObserver che
+         ricalcola gli stili a ogni modifica del DOM. Se il file manca (es. build locale senza
+         il passaggio npm) si ripiega sul compilatore runtime, come prima. -->
+    <link rel="stylesheet" href="vendor/tailwind.css"
+          onerror="var s=document.createElement('script');s.src='vendor/tailwind-browser.js';document.head.appendChild(s);">
     <script src="folder-access.js"></script>
     <script src="media-controls.js"></script>
     <link rel="stylesheet" href="vendor/fontawesome/all.min.css">
@@ -192,8 +203,8 @@
         /* Mini Player: Vetro satinato dinamico perfettamente integrato con l'estetica dell'app */
         .glass-panel {
             background: var(--bg-card);
-            backdrop-filter: blur(30px);
-            -webkit-backdrop-filter: blur(30px);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.08);
             box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.5);
         }
@@ -1127,7 +1138,10 @@
         .empty-home p { font-size:13.5px; color:var(--text-muted); margin:0; line-height:1.5; }
 
         /* ================= RISULTATI: righe con divisore (niente più pillole piene) ================= */
-        .track-row { position:relative; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
+        .track-row { position:relative; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none;
+                     /* Il browser salta layout e paint delle righe fuori schermo (liste da migliaia di
+                        brani): 64px = 44px copertina + py-2.5, la dimensione reale della riga. */
+                     content-visibility:auto; contain-intrinsic-size:auto 64px; }
         .track-row * { -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; -webkit-user-drag:none; user-drag:none; }
         .track-row img { touch-action:manipulation; }
         .track-row .text-sm { font-size:13.5px; }
@@ -2788,11 +2802,30 @@
         // non c'è), quindi non cambia nulla per chi apre l'app a mano.
         let pendingAutoplay = new URLSearchParams(location.search).get('autoplay') === '1';
 
+        // Chiude la splash screen NATIVA (plugin AppReady) quando l'interfaccia è pronta: contenuti
+        // iniziali disegnati (recenti + ultimo brano), font caricati e primo frame dipinto. Nessuna
+        // attesa infinita: tetto di 1,8s qui e di 2,5s lato nativo, quindi la splash non può
+        // restare bloccata (es. cartella lenta o app aperta in background da Tasker).
+        function signalAppReady(tasks) {
+            let sent = false;
+            const send = () => {
+                if (sent) return;
+                sent = true;
+                try { window.Capacitor?.Plugins?.AppReady?.ready(); } catch (e) { /* fuori dall'app nativa */ }
+            };
+            const afterPaint = () => {
+                requestAnimationFrame(() => requestAnimationFrame(send));
+                setTimeout(send, 400); // rAF non parte se la pagina è in background
+            };
+            const fontsReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+            const cap = new Promise(resolve => setTimeout(resolve, 1800));
+            Promise.race([Promise.allSettled([...tasks, fontsReady]), cap]).then(afterPaint, afterPaint);
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             onPlayerReady();
             renderRecentHome();
-            renderRecentTracksHome();
-            restoreLastPlayback();
+            const startupTasks = [renderRecentTracksHome(), restoreLastPlayback()];
             updateRepeatButtonUI();
 
             // Il tasto/gesto "indietro" di Android non è collegato di default alla
@@ -2811,6 +2844,7 @@
             }
 
             document.body.classList.remove('hidden');
+            signalAppReady(startupTasks);
             window.history.replaceState({ page: 'main' }, 'Main');
             // Stato "cuscinetto" extra: senza questo, con una sola entry nello history,
             // il primo back all'apertura dell'app esce direttamente (il browser non ha
@@ -4700,6 +4734,28 @@
             return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
+        // Osservatore per il caricamento "pigro" delle copertine della lista canzoni.
+        // rootMargin largo in orizzontale: la lista sta in una vista affiancata alla home
+        // (slide), così le righe iniziali sono già pronte prima dello swipe.
+        const trackArtQueue = new WeakMap();
+        let trackArtObserver = null;
+        function getTrackArtObserver() {
+            if (!trackArtObserver) {
+                trackArtObserver = new IntersectionObserver((entries) => {
+                    for (const entry of entries) {
+                        if (!entry.isIntersecting) continue;
+                        trackArtObserver.unobserve(entry.target);
+                        const item = trackArtQueue.get(entry.target);
+                        if (item) {
+                            trackArtQueue.delete(entry.target);
+                            displayLocalArtwork(item.img, null, item.track);
+                        }
+                    }
+                }, { rootMargin: '600px 100% 600px 100%' });
+            }
+            return trackArtObserver;
+        }
+
         function renderTracklist(fromIndex = 0) {
             const trackListDiv = document.getElementById('trackList');
             const resultsStatusText = document.getElementById('resultsStatusText');
@@ -4711,6 +4767,7 @@
             // renderizzate: prima invece si azzerava e ricreava tutta la lista,
             // causando il "flash" di tutti i tile (immagini comprese).
             if (fromIndex === 0) {
+                if (trackArtObserver) trackArtObserver.disconnect(); // righe vecchie: non servono più
                 trackListDiv.innerHTML = '';
                 // Una nuova lista (nuova ricerca o nuova playlist) riparte SEMPRE dalla
                 // cima: senza questo reset, lo scroll restava fermo alla posizione
@@ -4741,7 +4798,11 @@
                 const isPlaying = appState.currentIndex === index;
                 const trackRow = document.createElement('div');
                 trackRow.id = `track-row-${index}`;
-                trackRow.className = `track-row track-row-enter flex items-center gap-3.5 py-2.5 cursor-pointer transition-colors${isPlaying ? ' playing' : ''}`;
+                // Animazione d'ingresso solo per le prime righe, quelle davvero visibili: prima
+                // l'avevano TUTTE (migliaia di animazioni/layer, con le righe oltre la 20ª
+                // invisibili per quasi un secondo).
+                const animateIn = (index - fromIndex) < 14;
+                trackRow.className = `track-row${animateIn ? ' track-row-enter' : ''} flex items-center gap-3.5 py-2.5 cursor-pointer transition-colors${isPlaying ? ' playing' : ''}`;
                 // Scaglionato dall'alto verso il basso: ogni riga appare poco dopo la precedente,
                 // così il caricamento (immagini, dati) resta mascherato dall'animazione stessa.
                 trackRow.style.animationDelay = `${Math.min(index - fromIndex, 20) * 45}ms`;
@@ -4763,10 +4824,13 @@
                 trackListDiv.appendChild(trackRow);
 
                 if (track.id && !track.thumbnail) {
-                    setTimeout(() => {
-                        const img = document.getElementById(`track-img-${index}`);
-                        displayLocalArtwork(img, null, track);
-                    }, 0);
+                    // Lettura copertina (ID3) solo quando la riga entra in vista: prima partivano
+                    // in blocco TUTTE le letture di file della cartella, anche per migliaia di brani.
+                    const imgEl = trackRow.querySelector('img');
+                    if (imgEl) {
+                        trackArtQueue.set(trackRow, { img: imgEl, track });
+                        getTrackArtObserver().observe(trackRow);
+                    }
                 }
             }
 

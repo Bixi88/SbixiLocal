@@ -1,0 +1,5 @@
+/* Sorgente per il CSS Tailwind precompilato (npm run build:css -> www/vendor/tailwind.css).
+   source(none) + @source esplicito: si leggono solo le classi usate in index.html, senza
+   scansionare vendor/ (il compilatore browser da 280 KB e Font Awesome gonfierebbero il CSS). */
+@import "tailwindcss" source(none);
+@source "./www/index.html";

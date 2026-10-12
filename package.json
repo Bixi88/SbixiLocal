@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:css": "tailwindcss -i tailwind-input.css -o www/vendor/tailwind.css --minify"
   },
   "keywords": [],
   "author": "",
@@ -17,5 +18,9 @@
     "@fontsource/inter": "^5.3.0",
     "@fortawesome/fontawesome-free": "^7.3.1",
     "@tailwindcss/browser": "^4.3.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
   }
 }
