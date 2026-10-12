@@ -57,7 +57,20 @@ class PlaybackService : Service() {
         stopSelf()
     }
 
+    // Chiusura dell'app dai recenti (swipe): l'Activity e la WebView muoiono, ma questo
+    // servizio - e con lui la notifica - restava vivo. Il risultato era una notifica
+    // "fantasma": il contatore avanzava da solo, nessun suono e tasti che non facevano nulla
+    // perché la pagina che li gestiva non esiste più. Qui si spegne tutto.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        MediaControlsPlugin.instance?.shutdown()
+        stopPlaybackService()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
+        // Rete di sicurezza: qualunque sia il motivo della chiusura, la notifica non resta.
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        nm.cancel(NOTIF_ID)
         instance = null
         super.onDestroy()
     }

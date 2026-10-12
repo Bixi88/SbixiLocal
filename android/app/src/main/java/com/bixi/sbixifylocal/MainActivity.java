@@ -52,6 +52,13 @@ public class MainActivity extends BridgeActivity {
         applyFullscreen();
         requestHighRefreshRate();
 
+        // Eventuale notifica di una sessione precedente rimasta orfana (processo chiuso di
+        // colpo dal sistema): all'avvio si ripulisce, la prossima riproduzione la ricrea.
+        if (PlaybackService.Companion.getInstance() != null) {
+            PlaybackService.Companion.getInstance().stopPlaybackService();
+        }
+        androidx.core.app.NotificationManagerCompat.from(this).cancel(PlaybackService.NOTIF_ID);
+
         // Da Android 13 (API 33) le notifiche richiedono un permesso esplicito
         // dell'utente: senza chiederlo qui, la notifica di riproduzione (con
         // copertina, titolo e controlli) non comparirebbe mai, in silenzio.

@@ -3806,8 +3806,8 @@
                 currentListSource = 'local';
                 currentLoadedKey = 'folder:' + uri;
                 currentLoadedTitle = name || folder.name || 'Playlist';
-                showResultsView(currentLoadedTitle);
                 renderTracklist(0);
+                showResultsView(currentLoadedTitle);
                 updateRefreshPlaylistBtn(uri);
                 if (tracks.length === 0) {
                     showToast('Nessun file audio trovato in questa cartella (formati supportati: mp3, m4a, flac, wav, ogg, opus, aac, wma).');
@@ -4221,8 +4221,8 @@
                     // È già la playlist attualmente in memoria (nessun'altra apertura nel
                     // frattempo): la mostriamo di nuovo senza rielencare la cartella.
                     currentListSource = 'local';
+                    ensureTracklistRendered();
                     showResultsView(currentLoadedTitle);
-                    renderTracklist(0);
                     updateRefreshPlaylistBtn(uri);
                     return;
                 }
@@ -4489,8 +4489,8 @@
             const goToPlaylist = () => {
                 if (currentLoadedKey === savedKey && appState.tracks.length > 0) {
                     currentListSource = 'local';
+                    ensureTracklistRendered();
                     showResultsView(currentLoadedTitle);
-                    renderTracklist(0);
                 } else {
                     openLocalPlaylist(uri, nowPlayingListTitle);
                 }
@@ -4706,21 +4706,20 @@
                 if (resultsTitle) resultsTitle.textContent = title;
             }
             if (!slider || slider.classList.contains('showing-results')) return;
-            slider.classList.add('showing-results');
-            window.history.pushState({ page: 'results' }, 'Results');
 
-            // Se la lista che si sta aprendo è proprio quella in ascolto (stessa chiave:
-            // vedi nowPlayingListKey/currentLoadedKey usati altrove per lo stesso confronto),
-            // la riga del brano corrente è già evidenziata ('playing') da loadTrack: qui
-            // basta portarla in vista, così ogni volta che si entra nella lista canzoni la
-            // si ritrova già scrollata sul brano in corso, senza doverla cercare a mano.
-            // La traslazione orizzontale di #viewsSlider non sposta le righe verticalmente,
-            // quindi il calcolo di scrollActiveTrackRowIntoView resta valido subito, anche
-            // durante l'animazione di apertura.
+            // Se la lista che si sta aprendo è proprio quella in ascolto, la riga del brano
+            // corrente (già evidenziata da loadTrack) va portata in vista, così si entra già
+            // scrollati sul brano in corso. Lo si fa PRIMA di far partire lo slide e in modo
+            // istantaneo: la vista è ancora fuori schermo, quindi l'utente vede la lista già
+            // posizionata invece di uno scorrimento a tutta velocità durante l'animazione.
+            // (La traslazione orizzontale non sposta le righe in verticale: il calcolo vale.)
             if (nowPlayingListKey && nowPlayingListKey === currentLoadedKey && appState.currentIndex !== -1) {
                 const activeRow = document.getElementById(`track-row-${appState.currentIndex}`);
                 if (activeRow) scrollActiveTrackRowIntoView(activeRow);
             }
+
+            slider.classList.add('showing-results');
+            window.history.pushState({ page: 'results' }, 'Results');
         }
 
         function showHomeView() {
@@ -4756,6 +4755,23 @@
             return trackArtObserver;
         }
 
+        // Stato del disegno a blocchi della lista (vedi renderTracklist): evita di ricostruire da
+        // zero una lista già pronta e di bloccare il thread principale con migliaia di righe.
+        let trackListRenderedFor = null;   // array di brani di cui la lista è completa
+        let trackListRenderToken = 0;      // invalida i blocchi in corso quando parte un nuovo rebuild
+        let trackListChunkPending = false; // c'è ancora un blocco da disegnare
+
+        // Riapre una lista già in memoria: se le righe esistono già non si rifà nulla (prima
+        // si buttava via tutto e si ricostruiva a ogni tap, bloccando l'animazione di apertura).
+        function ensureTracklistRendered() {
+            const div = document.getElementById('trackList');
+            if (div && trackListRenderedFor === appState.tracks && !trackListChunkPending &&
+                div.querySelectorAll('.track-row').length === appState.tracks.length) {
+                return;
+            }
+            renderTracklist(0);
+        }
+
         function renderTracklist(fromIndex = 0) {
             const trackListDiv = document.getElementById('trackList');
             const resultsStatusText = document.getElementById('resultsStatusText');
@@ -4766,7 +4782,14 @@
             // vengono aggiunte SOLO le righe nuove, senza toccare quelle già
             // renderizzate: prima invece si azzerava e ricreava tutta la lista,
             // causando il "flash" di tutti i tile (immagini comprese).
+            // Aggiunta di righe mentre un disegno a blocchi è ancora in corso: il blocco in corso
+            // legge il totale aggiornato e le aggiungerà da solo, nell'ordine giusto.
+            if (fromIndex > 0 && trackListChunkPending) return;
+
             if (fromIndex === 0) {
+                trackListRenderToken++;
+                trackListChunkPending = false;
+                trackListRenderedFor = null;
                 if (trackArtObserver) trackArtObserver.disconnect(); // righe vecchie: non servono più
                 trackListDiv.innerHTML = '';
                 // Una nuova lista (nuova ricerca o nuova playlist) riparte SEMPRE dalla
@@ -4793,7 +4816,8 @@
 
             if (resultsStatusText) resultsStatusText.classList.add('hidden');
 
-            for (let index = fromIndex; index < appState.tracks.length; index++) {
+            const buildRow = (index) => {
+                if (document.getElementById(`track-row-${index}`)) return;
                 const track = appState.tracks[index];
                 const isPlaying = appState.currentIndex === index;
                 const trackRow = document.createElement('div');
@@ -4832,6 +4856,39 @@
                         getTrackArtObserver().observe(trackRow);
                     }
                 }
+            };
+
+            // Prima tranche subito (righe visibili + fino al brano in ascolto, così lo si può
+            // portare in vista), il resto a blocchi nei tempi morti: una cartella da migliaia
+            // di brani non blocca più il thread mentre parte l'animazione di apertura.
+            const FIRST_BATCH = 30, CHUNK = 40;
+            const total0 = appState.tracks.length;
+            const firstEnd = fromIndex === 0
+                ? Math.min(total0, Math.max(FIRST_BATCH, appState.currentIndex + 12))
+                : total0;
+            for (let i = fromIndex; i < firstEnd; i++) buildRow(i);
+
+            if (firstEnd >= total0) {
+                trackListRenderedFor = appState.tracks;
+            } else {
+                const token = trackListRenderToken;
+                let next = firstEnd;
+                trackListChunkPending = true;
+                const schedule = window.requestIdleCallback
+                    ? (fn) => window.requestIdleCallback(fn, { timeout: 250 })
+                    : (fn) => setTimeout(fn, 16);
+                const step = () => {
+                    if (token !== trackListRenderToken) return; // sostituita da un rebuild più recente
+                    const end = Math.min(appState.tracks.length, next + CHUNK);
+                    for (; next < end; next++) buildRow(next);
+                    if (next < appState.tracks.length) {
+                        schedule(step);
+                    } else {
+                        trackListChunkPending = false;
+                        trackListRenderedFor = appState.tracks;
+                    }
+                };
+                schedule(step);
             }
 
             // Se il brano in ascolto appartiene proprio a questa lista appena renderizzata
@@ -4878,7 +4935,7 @@
             const rowTopInScroll = rowRect.top - containerRect.top + container.scrollTop;
             const targetScrollTop = Math.max(0, rowTopInScroll - rowStep);
 
-            container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+            container.scrollTop = targetScrollTop; // istantaneo: la lista è ancora fuori schermo mentre si posiziona
         }
 
         async function loadTrack(index, sourceTracks = appState.tracks) {

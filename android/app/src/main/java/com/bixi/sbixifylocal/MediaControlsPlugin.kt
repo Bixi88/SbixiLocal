@@ -82,6 +82,28 @@ class MediaControlsPlugin : Plugin() {
 
     fun getMediaSession(): MediaSessionCompat? = mediaSession
 
+    // Spegne tutto: sessione media, servizio in primo piano e notifica. Chiamato quando
+    // l'app viene chiusa (swipe dai recenti, distruzione dell'Activity).
+    fun shutdown() {
+        hasActiveTrack = false
+        currentIsPlaying = false
+        try {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+        } catch (e: Exception) { /* già rilasciata */ }
+        mediaSession = null
+        PlaybackService.instance?.stopPlaybackService()
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.cancel(PlaybackService.NOTIF_ID)
+    }
+
+    // La pagina web sta per sparire: la notifica non deve sopravviverle.
+    override fun handleOnDestroy() {
+        shutdown()
+        if (instance === this) instance = null
+        super.handleOnDestroy()
+    }
+
     // Chiamato da JS (in un'unica chiamata, per non dover sincronizzare più stati)
     // ogni volta che cambia qualcosa di rilevante: nuovo brano, play/pausa, avanzamento.
     @PluginMethod

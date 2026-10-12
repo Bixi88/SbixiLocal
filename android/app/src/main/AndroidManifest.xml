@@ -40,6 +40,7 @@
         <service
             android:name=".PlaybackService"
             android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="true"
             android:exported="false" />
     </application>
 
