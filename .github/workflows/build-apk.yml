@@ -40,6 +40,7 @@ jobs:
 
       - name: Build signed release APK
         env:
+          SBIXILOCAL_VERSION_CODE: ${{ github.run_number }}
           SBIXILOCAL_KEYSTORE_PATH: ${{ runner.temp }}/sbixilocal-release.jks
           SBIXILOCAL_KEYSTORE_PASSWORD: ${{ secrets.SBIXILOCAL_KEYSTORE_PASSWORD }}
           SBIXILOCAL_KEY_ALIAS: ${{ secrets.SBIXILOCAL_KEY_ALIAS }}
