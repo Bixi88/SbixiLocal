@@ -369,12 +369,14 @@
             mask-image: linear-gradient(to right, transparent, #fff 6%, #fff 94%, transparent);
             -webkit-mask-image: linear-gradient(to right, transparent, #fff 6%, #fff 94%, transparent);
         }
+        /* will-change SOLO quando il testo scorre davvero: prima ce l'avevano tutti i testi
+           della lista (due per riga), cioè migliaia di livelli grafici separati inutili. */
         .marquee-content {
             display: inline-block;
             white-space: nowrap;
-            will-change: transform;
         }
         .animate-marquee {
+            will-change: transform;
             animation: marqueeLoop 12s linear infinite;
         }
         @keyframes marqueeLoop {
@@ -2539,9 +2541,11 @@
             return '';
         }
 
-        // Ritorna { title, artist, coverBlobUrl } leggendo i frame ID3v2 TIT2/TPE1/APIC.
+        // Ritorna { title, artist, coverBlob, coverMimeType } leggendo i frame ID3v2 TIT2/TPE1/APIC.
+        // La copertina esce come Blob (una COPIA dei soli byte dell'immagine): così il buffer
+        // grande da cui è stata letta può essere rilasciato subito, e niente base64 in memoria.
         function parseId3(bytes) {
-            const result = { title: null, artist: null, coverBlobUrl: null };
+            const result = { title: null, artist: null, coverBlob: null, coverMimeType: null };
             if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return result; // "ID3"
             const majorVersion = bytes[3];
             const tagSize = readSyncSafeOrPlainInt(bytes, 6, true);
@@ -2558,7 +2562,7 @@
                 const frameData = bytes.subarray(dataStart, dataEnd);
                 if (frameId === 'TIT2') result.title = decodeId3Text(frameData);
                 else if (frameId === 'TPE1') result.artist = decodeId3Text(frameData);
-                else if (frameId === 'APIC' && !result.coverBlobUrl) {
+                else if (frameId === 'APIC' && !result.coverBlob) {
                     try {
                         let p = 1; // salta encoding
                         let mimeEnd = frameData.indexOf(0, p);
@@ -2576,9 +2580,7 @@
                         }
                         const imgStart = descEnd + 1;
                         const imgBytes = frameData.subarray(imgStart);
-                        const blob = new Blob([imgBytes], { type: mimeType });
-                        result.coverBlobUrl = URL.createObjectURL(blob);
-                        result.coverBase64 = bytesToBase64(imgBytes);
+                        result.coverBlob = new Blob([imgBytes], { type: mimeType });
                         result.coverMimeType = mimeType;
                     } catch (err) { /* copertina malformata: si ignora, resta il placeholder */ }
                 }
@@ -2607,7 +2609,7 @@
         // VORBIS_COMMENT, che eredita il little-endian da Ogg Vorbis, ma qui non ci
         // interessa: vogliamo solo la copertina, non titolo/artista).
         function parseFlacPicture(bytes) {
-            const result = { coverBlobUrl: null, coverBase64: null, coverMimeType: null };
+            const result = { coverBlob: null, coverMimeType: null };
             if (bytes.length < 4 || bytes[0] !== 0x66 || bytes[1] !== 0x4C || bytes[2] !== 0x61 || bytes[3] !== 0x43) {
                 return result; // manca la firma "fLaC" in testa al file
             }
@@ -2632,9 +2634,7 @@
                         p += 4 + 4 + 4 + 4; // width, height, color depth, colori indicizzati
                         const dataLen = dv.getUint32(p); p += 4;
                         const imgBytes = bytes.subarray(blockStart + p, blockStart + p + dataLen);
-                        const blob = new Blob([imgBytes], { type: mimeType });
-                        result.coverBlobUrl = URL.createObjectURL(blob);
-                        result.coverBase64 = bytesToBase64(imgBytes);
+                        result.coverBlob = new Blob([imgBytes], { type: mimeType });
                         result.coverMimeType = mimeType;
                     } catch (err) { /* blocco PICTURE malformato: si ignora, resta il placeholder */ }
                     break;
@@ -2646,44 +2646,165 @@
             return result;
         }
 
-        // Legge la copertina incorporata di un brano (mp3 e flac per ora), con cache in
-        // memoria per non rileggere/riparsare lo stesso file più volte nella sessione.
+        // --- LETTURA DELLE COPERTINE: leggera e a pochi file alla volta ---
+        // Ogni lettura passa dal ponte nativo come testo base64 e va decodificata sul thread
+        // principale. Prima si leggevano sempre 3 MB per OGNI brano (anche solo per la
+        // miniatura in lista), senza limite di letture contemporanee, e in memoria restavano
+        // anche il base64 e un data URL di ogni copertina: scorrendo una cartella grande
+        // l'app andava a scatti e rallentava sempre di più. Ora:
+        //  - si legge prima la sola intestazione del tag (10 byte) per sapere quanto è grande,
+        //    poi esattamente quel tanto (nessun tag/copertina = nessuna lettura grossa);
+        //  - le miniature della lista passano da una coda con al massimo 2 letture insieme,
+        //    e parte per prima la riga apparsa per ultima (quella che si vede adesso);
+        //  - per le righe della lista si tiene solo una miniatura piccola, non l'immagine intera.
+        const ARTWORK_READ_CAP = 3 * 1024 * 1024;
+        const FLAC_FIRST_READ = 256 * 1024;
+        const ARTWORK_MAX_PARALLEL = 2;
+        const LIST_THUMB_SIZE = 128;
+        const localThumbCache = new Map();   // uri -> { url } miniatura per la lista (url null se non c'è)
+        const artworkInflight = new Map();   // chiave -> Promise: evita letture doppie dello stesso file
+        const artworkWaiting = [];           // pila di lavori in attesa (l'ultimo arrivato parte per primo)
+        let artworkActive = 0;
+
+        function pumpArtworkQueue() {
+            while (artworkActive < ARTWORK_MAX_PARALLEL && artworkWaiting.length) {
+                const job = artworkWaiting.pop();
+                artworkActive++;
+                job.task().then(job.resolve, job.reject).then(() => {
+                    artworkActive--;
+                    pumpArtworkQueue();
+                });
+            }
+        }
+
+        function queueArtworkTask(task) {
+            return new Promise((resolve, reject) => {
+                artworkWaiting.push({ task, resolve, reject });
+                pumpArtworkQueue();
+            });
+        }
+
+        function base64ToBytes(b64) {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes;
+        }
+
+        // true se i metadati FLAC non finiscono dentro il pezzo letto (la copertina potrebbe
+        // stare più avanti); false se il file è stato letto per intero o i metadati sono completi.
+        function flacMetadataContinues(bytes, requested) {
+            if (bytes.length < requested) return false;
+            if (bytes.length < 4 || bytes[0] !== 0x66 || bytes[1] !== 0x4C || bytes[2] !== 0x61 || bytes[3] !== 0x43) return false;
+            let offset = 4;
+            while (offset + 4 <= bytes.length) {
+                const isLast = (bytes[offset] & 0x80) !== 0;
+                const len = (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
+                if (isLast) return false;
+                offset += 4 + len;
+            }
+            return true;
+        }
+
+        // Legge dal file solo quello che serve. Ritorna { blob, mimeType } oppure null.
         // Usa track.path (nome file originale, con estensione) per capire il formato:
-        // track.title ne è già privo (vedi titleFromFilename), quindi non va bene per
-        // questo controllo. Ritorna { url, dataUrl, base64, mimeType } (tutti null se
-        // non trovata): url (blob, solo per questa sessione) per gli <img> a schermo,
-        // dataUrl (permanente, autosufficiente) per tutto ciò che va salvato in
-        // localStorage - un blob url salvato lì non funziona più alla riapertura
-        // dell'app, un data url sì.
-        async function getEmbeddedCoverForTrack(track) {
-            if (localArtworkCache.has(track.id)) return localArtworkCache.get(track.id);
-            let result = { url: null, dataUrl: null, base64: null, mimeType: null };
+        // track.title ne è già privo (vedi titleFromFilename).
+        async function readCoverBlobFromFile(track) {
             const filename = track.path || track.title || '';
             const isMp3 = /\.mp3$/i.test(filename);
             const isFlac = /\.flac$/i.test(filename);
-            if (isMp3 || isFlac) {
-                try {
-                    const res = await SbixiFolderAccess.readFileRaw(track.id, 3 * 1024 * 1024);
-                    const bin = atob(res.data);
-                    const bytes = new Uint8Array(bin.length);
-                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                    const meta = isMp3 ? parseId3(bytes) : parseFlacPicture(bytes);
-                    if (meta.coverBlobUrl) {
-                        result.url = meta.coverBlobUrl;
-                        result.base64 = meta.coverBase64;
-                        result.mimeType = meta.coverMimeType || 'image/jpeg';
-                        result.dataUrl = `data:${result.mimeType};base64,${result.base64}`;
-                    }
-                } catch (err) { /* niente copertina incorporata leggibile: resta il placeholder */ }
+            if (isMp3) {
+                const head = base64ToBytes((await SbixiFolderAccess.readFileRaw(track.id, 10)).data);
+                if (head.length < 10 || head[0] !== 0x49 || head[1] !== 0x44 || head[2] !== 0x33) return null; // nessun tag ID3v2
+                const want = Math.min(10 + readSyncSafeOrPlainInt(head, 6, true), ARTWORK_READ_CAP);
+                const bytes = base64ToBytes((await SbixiFolderAccess.readFileRaw(track.id, want)).data);
+                const meta = parseId3(bytes);
+                return meta.coverBlob ? { blob: meta.coverBlob, mimeType: meta.coverMimeType || 'image/jpeg' } : null;
             }
-            localArtworkCache.set(track.id, result);
-            return result;
+            if (isFlac) {
+                let bytes = base64ToBytes((await SbixiFolderAccess.readFileRaw(track.id, FLAC_FIRST_READ)).data);
+                let meta = parseFlacPicture(bytes);
+                if (!meta.coverBlob && flacMetadataContinues(bytes, FLAC_FIRST_READ)) {
+                    bytes = base64ToBytes((await SbixiFolderAccess.readFileRaw(track.id, ARTWORK_READ_CAP)).data);
+                    meta = parseFlacPicture(bytes);
+                }
+                return meta.coverBlob ? { blob: meta.coverBlob, mimeType: meta.coverMimeType || 'image/jpeg' } : null;
+            }
+            return null;
+        }
+
+        // Riduce una copertina a una miniatura quadrata (ritaglio centrale): le righe della
+        // lista sono da 44 px, tenere e decodificare immagini da 1000+ px per ciascuna è puro
+        // spreco. Se qualcosa non è supportato ritorna null e si usa l'immagine intera.
+        async function makeListThumbUrl(blob) {
+            try {
+                if (typeof createImageBitmap !== 'function') return null;
+                const bmp = await createImageBitmap(blob);
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = LIST_THUMB_SIZE;
+                    canvas.height = LIST_THUMB_SIZE;
+                    const side = Math.min(bmp.width, bmp.height);
+                    canvas.getContext('2d').drawImage(
+                        bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side,
+                        0, 0, LIST_THUMB_SIZE, LIST_THUMB_SIZE
+                    );
+                    const out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+                    return out ? URL.createObjectURL(out) : null;
+                } finally {
+                    if (bmp.close) bmp.close();
+                }
+            } catch (err) { return null; }
+        }
+
+        // Copertina incorporata di un brano (mp3 e flac per ora), con cache in memoria per
+        // non rileggere/riparsare lo stesso file più volte nella sessione.
+        // Ritorna { url, blob, mimeType } (url null se non trovata): url è un blob URL valido
+        // solo in questa sessione, per gli <img> a schermo. Per salvare qualcosa in modo
+        // permanente (localStorage) l'immagine va prima ridotta (vedi downscaleImageForStorage),
+        // per la notifica nativa si usa getCoverBase64().
+        // opts.thumb = serve solo per la riga di una lista: miniatura piccola, letta in coda.
+        async function getEmbeddedCoverForTrack(track, opts) {
+            const thumb = !!(opts && opts.thumb);
+            if (localArtworkCache.has(track.id)) return localArtworkCache.get(track.id); // immagine intera già pronta: va bene per tutto
+            if (thumb && localThumbCache.has(track.id)) return localThumbCache.get(track.id);
+            const key = (thumb ? 't:' : 'f:') + track.id;
+            if (artworkInflight.has(key)) return artworkInflight.get(key);
+
+            const work = async () => {
+                let found = null;
+                try { found = await readCoverBlobFromFile(track); } catch (err) { /* niente copertina leggibile: resta il placeholder */ }
+                if (thumb) {
+                    let url = null;
+                    if (found) url = (await makeListThumbUrl(found.blob)) || URL.createObjectURL(found.blob);
+                    const res = { url, blob: null, mimeType: found ? found.mimeType : null };
+                    localThumbCache.set(track.id, res);
+                    return res;
+                }
+                const res = found
+                    ? { url: URL.createObjectURL(found.blob), blob: found.blob, mimeType: found.mimeType }
+                    : { url: null, blob: null, mimeType: null };
+                localArtworkCache.set(track.id, res);
+                return res;
+            };
+            const promise = (thumb ? queueArtworkTask(work) : work()).finally(() => artworkInflight.delete(key));
+            artworkInflight.set(key, promise);
+            return promise;
+        }
+
+        // Base64 della copertina intera, solo per la notifica nativa (una volta per brano).
+        async function getCoverBase64(cover) {
+            if (!cover || !cover.blob) return null;
+            try {
+                return bytesToBase64(new Uint8Array(await cover.blob.arrayBuffer()));
+            } catch (err) { return null; }
         }
 
         // Applica copertina (e, se ricavabile, titolo/artista migliori) a sheetImg/miniImg.
         // Copertina incorporata (mp3/flac) -> altrimenti icona generica.
-        async function displayLocalArtwork(sheetImg, miniImg, track) {
-            const cover = await getEmbeddedCoverForTrack(track);
+        // forList = true per le righe della lista: miniatura piccola e lettura in coda.
+        async function displayLocalArtwork(sheetImg, miniImg, track, forList) {
+            const cover = await getEmbeddedCoverForTrack(track, forList ? { thumb: true } : undefined);
             const finalUrl = cover.url || FALLBACK_ARTWORK;
             if (sheetImg) sheetImg.src = finalUrl;
             if (miniImg) miniImg.src = finalUrl;
@@ -3716,6 +3837,9 @@
         // 200x200 a qualità 0.72 basta ampiamente per un'icona di playlist.
         function downscaleImageForStorage(sourceDataUrl, maxSize) {
             return new Promise((resolve) => {
+                // Se la riduzione fallisce non si può salvare un blob URL (non vale più alla
+                // riapertura dell'app): in quel caso si ritorna null e non si salva nulla.
+                const fallback = (typeof sourceDataUrl === 'string' && sourceDataUrl.startsWith('blob:')) ? null : sourceDataUrl;
                 try {
                     const img = new Image();
                     img.onload = () => {
@@ -3732,11 +3856,11 @@
                             const ctx = canvas.getContext('2d');
                             ctx.drawImage(img, 0, 0, width, height);
                             resolve(canvas.toDataURL('image/jpeg', 0.72));
-                        } catch (err) { resolve(sourceDataUrl); }
+                        } catch (err) { resolve(fallback); }
                     };
-                    img.onerror = () => resolve(sourceDataUrl);
+                    img.onerror = () => resolve(fallback);
                     img.src = sourceDataUrl;
-                } catch (err) { resolve(sourceDataUrl); }
+                } catch (err) { resolve(fallback); }
             });
         }
 
@@ -3748,8 +3872,8 @@
             const covers = [];
             for (const t of candidates) {
                 const cover = await getEmbeddedCoverForTrack(t);
-                if (cover.dataUrl) {
-                    covers.push(cover.dataUrl);
+                if (cover.url) {
+                    covers.push(cover.url);
                     if (covers.length >= limit) break;
                 }
             }
@@ -3771,7 +3895,9 @@
             const rotation = idx !== -1 ? (items[idx].artworkRotation || 0) + 1 : 0;
             const picked = covers[rotation % covers.length];
 
-            return { url: await downscaleImageForStorage(picked, 200), rotation };
+            const smallUrl = await downscaleImageForStorage(picked, 200);
+            if (!smallUrl) return null;
+            return { url: smallUrl, rotation };
         }
 
         // Cerca (o ricerca, con force=true anche se già tentato prima) la copertina di
@@ -4633,47 +4759,108 @@
         const MARQUEE_TARGET_SELECTOR = '.truncate, .rt, .t-title, .t-sub, .a-name, .a-sub, .settings-playlist-name, .qcard .name, .chart-card-label';
         let marqueeMutationGuard = false;
 
-        function activateMarquee(el) {
-            if (!el || marqueeMutationGuard) return;
-            const hasStructure = !!(el.firstElementChild && el.firstElementChild.classList && el.firstElementChild.classList.contains('marquee-content'));
-            const text = (hasStructure ? (el.dataset.marqueeSrc || '') : (el.textContent || '')).trim();
-            if (!text) return;
-            if (el.children.length && !hasStructure) return; // markup non testuale: non lo tocchiamo
-            const widthNow = String(el.clientWidth);
-            if (hasStructure && el.dataset.marqueeSrc === text && el.dataset.marqueeW === widthNow) return; // niente di cambiato
+        // Elabora un GRUPPO di elementi in quattro fasi (leggi, scrivi, leggi, scrivi): prima
+        // si faceva un elemento alla volta alternando lettura e scrittura, e il browser doveva
+        // ricalcolare il layout a ogni passo (centinaia di volte per una lista lunga).
+        function activateMarqueeBatch(elements) {
+            if (marqueeMutationGuard || !elements.length) return;
+            // 1) lettura: quali elementi vanno davvero rifatti
+            const todo = [];
+            for (const el of elements) {
+                if (!el || !el.isConnected) continue;
+                const hasStructure = !!(el.firstElementChild && el.firstElementChild.classList && el.firstElementChild.classList.contains('marquee-content'));
+                const text = (hasStructure ? (el.dataset.marqueeSrc || '') : (el.textContent || '')).trim();
+                if (!text) continue;
+                if (el.children.length && !hasStructure) continue; // markup non testuale: non lo tocchiamo
+                const widthNow = String(el.clientWidth);
+                if (hasStructure && el.dataset.marqueeSrc === text && el.dataset.marqueeW === widthNow) continue; // niente di cambiato
+                todo.push({ el, text, widthNow, content: null, overflow: false });
+            }
+            if (!todo.length) return;
             marqueeMutationGuard = true;
             try {
-                el.dataset.marqueeSrc = text;
-                el.dataset.marqueeW = widthNow;
-                el.classList.remove('marquee-fade');
-                el.innerHTML = `<span class="marquee-content">${escapeHtml(text)}</span>`;
-                const content = el.firstElementChild;
-                if (content.scrollWidth > el.clientWidth + 1) {
-                    const gap = "<span class='inline-block w-10'></span>";
-                    content.innerHTML = escapeHtml(text) + gap + escapeHtml(text) + gap;
-                    content.classList.add('animate-marquee');
-                    el.classList.add('marquee-fade');
+                // 2) scrittura: il testo dentro un unico span
+                for (const t of todo) {
+                    t.el.dataset.marqueeSrc = t.text;
+                    t.el.dataset.marqueeW = t.widthNow;
+                    t.el.classList.remove('marquee-fade');
+                    t.el.innerHTML = `<span class="marquee-content">${escapeHtml(t.text)}</span>`;
+                    t.content = t.el.firstElementChild;
+                }
+                // 3) lettura: quali sono davvero più larghi del loro contenitore
+                for (const t of todo) t.overflow = t.content.scrollWidth > t.el.clientWidth + 1;
+                // 4) scrittura: scorrimento a loop solo dove serve
+                const gap = "<span class='inline-block w-10'></span>";
+                for (const t of todo) {
+                    if (!t.overflow) continue;
+                    t.content.innerHTML = escapeHtml(t.text) + gap + escapeHtml(t.text) + gap;
+                    t.content.classList.add('animate-marquee');
+                    t.el.classList.add('marquee-fade');
                 }
             } finally {
                 marqueeMutationGuard = false;
             }
         }
 
+        function activateMarquee(el) {
+            activateMarqueeBatch([el]);
+        }
+
         function activateMarquees(root) {
-            (root || document).querySelectorAll(MARQUEE_TARGET_SELECTOR).forEach(activateMarquee);
+            activateMarqueeBatch(Array.from((root || document).querySelectorAll(MARQUEE_TARGET_SELECTOR)));
         }
 
         (function setupGenericMarqueeObserver() {
+            // Prima, a ogni modifica l'observer rileggeva TUTTO il contenitore modificato: con
+            // una lista di migliaia di brani costruita a blocchi di 40 righe, ogni blocco
+            // rimisurava tutte le righe già presenti (costo che cresce a ogni blocco, quindi
+            // quadratico). Ora si guardano solo i nodi appena aggiunti e il testo cambiato, e
+            // si elaborano insieme una volta per fotogramma (prima del disegno, quindi senza
+            // che si veda lo stato intermedio).
+            let pending = new Set();
+            let flushScheduled = false;
+            let catchUpTimer = null;
+
+            function collect(node) {
+                if (node.matches(MARQUEE_TARGET_SELECTOR)) pending.add(node);
+                const inner = node.querySelectorAll(MARQUEE_TARGET_SELECTOR);
+                for (let i = 0; i < inner.length; i++) pending.add(inner[i]);
+            }
+
+            function flush() {
+                flushScheduled = false;
+                const list = Array.from(pending);
+                pending = new Set();
+                activateMarqueeBatch(list);
+                // Dopo un'aggiunta grossa (lista di brani) una sola passata di controllo a cose
+                // ferme: ricontrolla le larghezze di righe costruite mentre erano ancora
+                // nascoste o in animazione. Una modifica singola (es. cambio titolo) non la fa
+                // scattare.
+                if (list.length >= 20) {
+                    clearTimeout(catchUpTimer);
+                    catchUpTimer = setTimeout(() => activateMarquees(document), 500);
+                }
+            }
+
             const observer = new MutationObserver((mutations) => {
-                if (marqueeMutationGuard) return;
-                const targets = new Set();
-                mutations.forEach(m => {
-                    const node = m.target.nodeType === 1 ? m.target : m.target.parentElement;
-                    if (!node || !node.closest || !node.closest('body')) return;
-                    if (node.matches && node.matches(MARQUEE_TARGET_SELECTOR)) targets.add(node);
-                    if (node.querySelectorAll) node.querySelectorAll(MARQUEE_TARGET_SELECTOR).forEach(n => targets.add(n));
-                });
-                targets.forEach(activateMarquee);
+                for (const m of mutations) {
+                    if (m.type === 'characterData') {
+                        const p = m.target.parentElement;
+                        if (p && p.matches(MARQUEE_TARGET_SELECTOR)) pending.add(p);
+                        continue;
+                    }
+                    const t = m.target;
+                    // Testo cambiato dentro un elemento da troncare (es. el.textContent = ...)
+                    if (t.nodeType === 1 && t.matches(MARQUEE_TARGET_SELECTOR)) pending.add(t);
+                    // Righe/blocchi nuovi: solo i nodi aggiunti, non l'intero contenitore
+                    for (const n of m.addedNodes) {
+                        if (n.nodeType === 1) collect(n);
+                    }
+                }
+                if (pending.size && !flushScheduled) {
+                    flushScheduled = true;
+                    requestAnimationFrame(flush);
+                }
             });
             observer.observe(document.body, { childList: true, subtree: true, characterData: true });
             let resizeT = null;
@@ -4747,7 +4934,7 @@
                         const item = trackArtQueue.get(entry.target);
                         if (item) {
                             trackArtQueue.delete(entry.target);
-                            displayLocalArtwork(item.img, null, item.track);
+                            displayLocalArtwork(item.img, null, item.track, true);
                         }
                     }
                 }, { rootMargin: '600px 100% 600px 100%' });
@@ -5134,8 +5321,9 @@
             pushNativeNowPlaying(true);
             try {
                 const cover = await getEmbeddedCoverForTrack(track);
+                const coverBase64 = await getCoverBase64(cover);
                 if (currentNativeMeta.title === track.title && currentNativeMeta.artist === track.channel) {
-                    currentNativeMeta.artworkBase64 = cover.base64 || null;
+                    currentNativeMeta.artworkBase64 = coverBase64;
                     pushNativeNowPlaying(true);
                 }
             } catch (e) {}
