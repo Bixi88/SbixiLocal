@@ -3,8 +3,11 @@ package com.bixi.sbixifylocal
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -44,10 +47,40 @@ class MediaControlsPlugin : Plugin() {
     private var currentIsPlaying = false
     private var hasActiveTrack = false
 
+    // Cuffie/auricolari Bluetooth (o cavo) che si spengono o si scollegano: Android manda
+    // BECOMING_NOISY, altrimenti la musica passerebbe all'altoparlante del telefono. Qui si
+    // manda "pause" alla pagina, che mette in pausa solo se sta davvero suonando.
+    private var noisyReceiver: BroadcastReceiver? = null
+
     override fun load() {
         instance = this
         createNotificationChannel()
         setupMediaSession()
+        registerNoisyReceiver()
+    }
+
+    private fun registerNoisyReceiver() {
+        if (noisyReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                    notifyListeners("pause", JSObject())
+                }
+            }
+        }
+        try {
+            ContextCompat.registerReceiver(
+                context, receiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            noisyReceiver = receiver
+        } catch (e: Exception) { /* non bloccante */ }
+    }
+
+    private fun unregisterNoisyReceiver() {
+        val receiver = noisyReceiver ?: return
+        try { context.unregisterReceiver(receiver) } catch (e: Exception) { /* già rimosso */ }
+        noisyReceiver = null
     }
 
     private fun createNotificationChannel() {
@@ -99,6 +132,7 @@ class MediaControlsPlugin : Plugin() {
 
     // La pagina web sta per sparire: la notifica non deve sopravviverle.
     override fun handleOnDestroy() {
+        unregisterNoisyReceiver()
         shutdown()
         if (instance === this) instance = null
         super.handleOnDestroy()
