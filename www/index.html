@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="it">
 <head>
+    <!-- SbixiLocal: riordino brani, build 2026-10-26b -->
     <meta charset="UTF-8">
     <script>
         // Immersive è l'unica skin dell'app (Moderna e Walkman sono state rimosse): la
@@ -1015,6 +1016,40 @@
         .results-header .refresh-btn { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:rgba(255,255,255,0.05); flex:0 0 auto; font-size:13px; opacity:.85; }
         .results-header .refresh-btn:active { transform:scale(0.9); }
 
+        /* ================= RIORDINO MANUALE DEI BRANI (playlist locali) =================
+           Pulsante nell'header: acceso = modalità "Riordina". In quella modalità ogni riga
+           mostra una pillola con freccia su / freccia giù / maniglia da trascinare. */
+        .results-header .refresh-btn.reorder-on,
+        .results-header .refresh-btn.armed { background:var(--accent); color:var(--bg-main); opacity:1; }
+        .track-move { display:none; align-items:center; gap:2px; flex:0 0 auto; padding:2px; border-radius:999px; background:rgba(255,255,255,0.07); }
+        #trackList.reordering .track-move { display:flex; }
+        .track-move button { background:transparent; border:0; padding:0; width:30px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-main); opacity:.9; }
+        .track-move button:active { background:var(--accent); color:var(--bg-main); transform:scale(0.9); }
+        .track-move .tm-grip { touch-action:none; color:var(--accent); font-size:14px; cursor:grab; }
+        #trackList.reordering .track-row { cursor:default; }
+        #trackList.reordering .track-row:first-child .tm-up,
+        #trackList.reordering .track-row:last-child .tm-down { opacity:.25; pointer-events:none; }
+        /* Lampo d'accento sulla riga appena spostata: solo bordo interno (box-shadow inset),
+           così non copre la pillola colorata del brano in ascolto e non viene tagliato dal
+           content-visibility della riga. */
+        .track-row.moved { animation: trackMoved 0.8s ease-out; }
+        @keyframes trackMoved {
+            from { box-shadow: inset 0 0 0 2px rgba(255,154,33,0.9); }
+            to   { box-shadow: inset 0 0 0 2px rgba(255,154,33,0); }
+        }
+        .track-row.dragging {
+            content-visibility: visible; z-index: 20; background: var(--bg-input); border-radius: 18px;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.55);
+            margin-left: -8px; margin-right: -8px; padding-left: 8px; padding-right: 8px;
+        }
+        .track-row.dragging::after { display:none; }
+        /* Sulla pillola del brano in ascolto (sfondo --immersive-accent) i controlli usano lo
+           stesso colore testo calcolato per la pillola, altrimenti sparirebbero. */
+        html.immersive .track-row.playing .track-move { background: rgba(0,0,0,0.14); }
+        html.immersive .track-row.playing .track-move button,
+        html.immersive .track-row.playing .track-move .tm-grip { color: var(--immersive-accent-text); opacity: 1; }
+        html.immersive .track-row.playing .track-move button:active { background: var(--immersive-accent-text); color: var(--immersive-accent); }
+
         /* ================= HOME: griglia "Playlist" (fissa, 3 colonne) + colonna "Canzoni" ================= */
         /* Stessa dimensione/peso/uppercase del titolo playlist nell'header risultati
            (.results-header .rt) così le due schermate restano coerenti fra loro. */
@@ -1773,6 +1808,12 @@
                             <i class="fa-solid fa-arrow-left"></i>
                         </button>
                         <span class="rt display" id="resultsTitle">Risultati</span>
+                        <button id="resetOrderBtn" class="hidden refresh-btn" title="Ripristina l'ordine originale">
+                            <i class="fa-solid fa-rotate-left"></i>
+                        </button>
+                        <button id="reorderPlaylistBtn" class="hidden refresh-btn" title="Riordina brani">
+                            <i class="fa-solid fa-arrows-up-down"></i>
+                        </button>
                         <button id="refreshPlaylistBtn" class="hidden refresh-btn" title="Aggiorna playlist (rilegge la cartella)">
                             <i class="fa-solid fa-rotate"></i>
                         </button>
@@ -2061,6 +2102,14 @@
         let nowPlayingListType = null;
         let nowPlayingListKey = null;
         let nowPlayingListTitle = '';
+        // Riordino manuale dei brani: ordine personalizzato salvato per ogni cartella/playlist
+        // (lista di id = uri dei file), riapplicato ogni volta che la cartella viene rielencata.
+        const TRACK_ORDER_KEY_PREFIX = 'sbixify_local_order:';
+        const REORDER_HINT_KEY = 'sbixify_reorder_hint_seen';
+        let reorderMode = false;
+        let orderSaveTimer = null;
+        let pendingOrderSave = null;
+        let resetOrderArmedTimer = null;
         const miniPlayer = document.getElementById('miniPlayer');
 
         // ================= Skin "Immersive": colore dominante scuro dall'artwork =================
@@ -3137,6 +3186,7 @@
                 hapticFeedback();
                 openLocalPlaylist(uri, currentLoadedTitle, true);
             });
+            setupTrackReorder();
 
             // Pulsante aggiornamento app e barra di ricerca rimossi: niente service
             // worker, niente ricerca/import online in SbixiLocal.
@@ -3926,7 +3976,11 @@
         async function openLocalPlaylist(uri, name, isRefresh) {
             try {
                 const folder = await SbixiFolderAccess.listFolder(uri);
-                const tracks = tracksFromFolderResult(folder);
+                // Nuova apertura: via dal riordino e salvataggio di un eventuale ordine in sospeso
+                // PRIMA di rileggere, così l'ordine personalizzato appena modificato viene riapplicato.
+                if (reorderMode) setReorderMode(false);
+                flushCustomOrderSave();
+                const tracks = applyCustomOrder(tracksFromFolderResult(folder), 'folder:' + uri);
                 appState.tracks = tracks;
                 appState.currentIndex = -1;
                 currentListSource = 'local';
@@ -3963,7 +4017,7 @@
                 const uri = saved.listKey.slice('folder:'.length);
                 try {
                     const folder = await SbixiFolderAccess.listFolder(uri);
-                    const tracks = tracksFromFolderResult(folder);
+                    const tracks = applyCustomOrder(tracksFromFolderResult(folder), saved.listKey);
                     if (tracks.length) {
                         restoredTracks = tracks;
                         restoredIndex = Math.min(Math.max(saved.index || 0, 0), restoredTracks.length - 1);
@@ -3987,6 +4041,7 @@
                 renderTracklist(0);
                 const resultsTitle = document.getElementById('resultsTitle');
                 if (resultsTitle) resultsTitle.textContent = currentLoadedTitle;
+                updateReorderBtn();
             }
 
             nowPlayingTracks = restoredTracks;
@@ -4031,6 +4086,7 @@
             if (!btn) return;
             btn.dataset.folderUri = uri || '';
             btn.classList.toggle('hidden', !uri);
+            updateReorderBtn();
         }
 
         // --- HOME: "Recenti" ---
@@ -4882,6 +4938,7 @@
         // di altezza via JS (ognuno mantiene sempre la propria altezza naturale/compatta).
 
         function showResultsView(title) {
+            updateReorderBtn();
             // Vedi commento vicino alla definizione di hideSearchSuggestions (dentro
             // DOMContentLoaded): è esposta su window per essere raggiungibile da qui.
             // Optional chaining come rete di sicurezza extra, nel caso questa venga
@@ -4913,6 +4970,8 @@
             const slider = document.getElementById('viewsSlider');
             if (!slider) return;
             slider.classList.remove('showing-results');
+            // Tornando alle playlist si esce dal riordino (e l'ordine viene salvato subito).
+            if (reorderMode) setReorderMode(false);
         }
 
         function escapeHtml(text) {
@@ -5009,6 +5068,7 @@
                 const isPlaying = appState.currentIndex === index;
                 const trackRow = document.createElement('div');
                 trackRow.id = `track-row-${index}`;
+                trackRow.dataset.index = index;
                 // Animazione d'ingresso solo per le prime righe, quelle davvero visibili: prima
                 // l'avevano TUTTE (migliaia di animazioni/layer, con le righe oltre la 20ª
                 // invisibili per quasi un secondo).
@@ -5026,11 +5086,21 @@
                         <p class="text-sm font-bold truncate ${isPlaying ? 'custom-text-accent font-black' : 'text-white'}">${escapeHtml(track.title)}</p>
                         <p class="text-xs truncate mt-1 custom-text-muted font-medium">${escapeHtml(track.channel)}</p>
                     </div>
+                    <div class="track-move">
+                        <button type="button" class="tm-up" aria-label="Sposta in alto"><i class="fa-solid fa-chevron-up"></i></button>
+                        <button type="button" class="tm-down" aria-label="Sposta in basso"><i class="fa-solid fa-chevron-down"></i></button>
+                        <button type="button" class="tm-grip" aria-label="Trascina per spostare"><i class="fa-solid fa-grip-lines"></i></button>
+                    </div>
                 `;
 
                 trackRow.addEventListener('click', () => {
+                    // In modalità riordino il tap sulla riga non avvia il brano (si rischiava di
+                    // farlo partire per sbaglio mentre si spostano i pezzi).
+                    if (reorderMode) return;
                     hapticFeedback();
-                    loadTrack(index);
+                    // L'indice si legge dalla riga e non dalla closure: dopo uno spostamento le
+                    // righe vengono rinumerate (vedi moveTrack).
+                    loadTrack(parseInt(trackRow.dataset.index, 10));
                 });
                 trackListDiv.appendChild(trackRow);
 
@@ -5088,6 +5158,397 @@
                 const activeRow = document.getElementById(`track-row-${appState.currentIndex}`);
                 if (activeRow) scrollActiveTrackRowIntoView(activeRow);
             }
+        }
+
+        // ================= RIORDINO MANUALE DEI BRANI =================
+        // Sposta i brani della lista in alto/in basso (frecce o trascinamento) così vengono
+        // riprodotti prima o dopo gli altri. L'array appState.tracks viene modificato SUL POSTO:
+        // se è anche la coda in ascolto (nowPlayingTracks === appState.tracks) "avanti/indietro"
+        // e la fine brano seguono subito il nuovo ordine. L'ordine è salvato per cartella.
+
+        function customOrderKey(listKey) { return TRACK_ORDER_KEY_PREFIX + listKey; }
+
+        function loadCustomOrder(listKey) {
+            try {
+                const raw = JSON.parse(localStorage.getItem(customOrderKey(listKey)));
+                return Array.isArray(raw) ? raw : null;
+            } catch (err) { return null; }
+        }
+
+        function hasCustomOrder(listKey) {
+            if (!listKey) return false;
+            if (pendingOrderSave && pendingOrderSave.key === listKey) return true;
+            try { return localStorage.getItem(customOrderKey(listKey)) !== null; } catch (err) { return false; }
+        }
+
+        // Riapplica l'ordine salvato a una lista appena elencata dalla cartella. I brani che
+        // non sono nell'ordine salvato (file aggiunti dopo) vanno in fondo, nell'ordine originale;
+        // quelli spariti dalla cartella vengono semplicemente ignorati.
+        function applyCustomOrder(tracks, listKey) {
+            const saved = loadCustomOrder(listKey);
+            if (!saved || !saved.length || tracks.length < 2) return tracks;
+            const byId = new Map();
+            for (const t of tracks) {
+                if (!byId.has(t.id)) byId.set(t.id, []);
+                byId.get(t.id).push(t);
+            }
+            const ordered = [];
+            for (const id of saved) {
+                const bucket = byId.get(id);
+                if (bucket && bucket.length) ordered.push(bucket.shift());
+            }
+            for (const t of tracks) {
+                const bucket = byId.get(t.id);
+                if (bucket && bucket.length && bucket[0] === t) { ordered.push(t); bucket.shift(); }
+            }
+            return ordered;
+        }
+
+        function flushCustomOrderSave() {
+            clearTimeout(orderSaveTimer);
+            if (!pendingOrderSave) return;
+            const { key, tracks } = pendingOrderSave;
+            pendingOrderSave = null;
+            try {
+                localStorage.setItem(customOrderKey(key), JSON.stringify(tracks.map(t => t.id)));
+            } catch (err) {
+                console.warn('Impossibile salvare l\'ordine dei brani:', err);
+                showToast('Impossibile salvare il nuovo ordine (memoria piena).');
+            }
+        }
+
+        // Salvataggio con un piccolo ritardo: toccando più volte le frecce di seguito si
+        // scrive una volta sola. Viene comunque forzato quando l'app va in background.
+        function scheduleSaveCustomOrder() {
+            pendingOrderSave = { key: currentLoadedKey, tracks: appState.tracks };
+            clearTimeout(orderSaveTimer);
+            orderSaveTimer = setTimeout(flushCustomOrderSave, 300);
+        }
+
+        // Dopo uno spostamento (o un nuovo elenco della stessa cartella) riallinea indice e
+        // evidenziazione del brano in ascolto, se appartiene alla lista che si sta sfogliando.
+        function syncPlayingAfterReorder(playingTrack) {
+            if (!playingTrack || !nowPlayingListKey || nowPlayingListKey !== currentLoadedKey) return;
+            const idx = appState.tracks.findIndex(t => t === playingTrack || t.id === playingTrack.id);
+            if (idx === -1) return;
+            nowPlayingTracks = appState.tracks;
+            nowPlayingIndex = idx;
+            appState.currentIndex = idx;
+
+            const div = document.getElementById('trackList');
+            if (div) {
+                const activeId = `track-row-${idx}`;
+                div.querySelectorAll('.track-row.playing').forEach(r => {
+                    if (r.id === activeId) return;
+                    r.classList.remove('playing');
+                    const p = r.querySelector('p.text-sm');
+                    if (p) { p.classList.remove('custom-text-accent', 'font-black'); p.classList.add('text-white'); }
+                });
+                const activeRow = document.getElementById(activeId);
+                if (activeRow && !activeRow.classList.contains('playing')) {
+                    activeRow.classList.add('playing');
+                    const p = activeRow.querySelector('p.text-sm');
+                    if (p) { p.classList.remove('text-white'); p.classList.add('custom-text-accent', 'font-black'); }
+                }
+            }
+
+            // L'indice salvato per la ripresa all'avvio deve restare coerente col nuovo ordine.
+            const cur = nowPlayingTracks[nowPlayingIndex];
+            if (cur) {
+                saveLastPlayback({
+                    track: { title: cur.title, channel: cur.channel, id: cur.id || null, thumbnail: cur.thumbnail || null },
+                    listType: nowPlayingListType,
+                    listKey: nowPlayingListKey,
+                    listTitle: nowPlayingListTitle,
+                    index: idx
+                });
+            }
+        }
+
+        // Porta in vista una riga appena spostata, tenendo conto di header e mini player.
+        function keepRowInView(row) {
+            const container = document.getElementById('resultsView');
+            if (!container || !row) return;
+            const cRect = container.getBoundingClientRect();
+            const rRect = row.getBoundingClientRect();
+            const headerH = document.getElementById('resultsHeader')?.offsetHeight || 0;
+            const mp = document.getElementById('miniPlayer');
+            const covered = (mp && mp.classList.contains('visible')) ? mp.getBoundingClientRect().height + 24 : 0;
+            const top = cRect.top + headerH + 6;
+            const bottom = cRect.bottom - covered - 6;
+            if (rRect.top < top) container.scrollBy({ top: rRect.top - top - 8, behavior: 'smooth' });
+            else if (rRect.bottom > bottom) container.scrollBy({ top: rRect.bottom - bottom + 8, behavior: 'smooth' });
+        }
+
+        // Sposta il brano "from" nella posizione "to": dati, righe del DOM (si muove solo la
+        // riga interessata, le altre vengono rinumerate), coda in ascolto e salvataggio.
+        function moveTrack(from, to) {
+            const list = appState.tracks;
+            const div = document.getElementById('trackList');
+            if (!div || from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return false;
+
+            // Le righe coinvolte devono esistere: il disegno a blocchi di liste molto lunghe
+            // potrebbe non aver ancora creato quelle in fondo.
+            const lo = Math.min(from, to), hi = Math.max(from, to);
+            const rows = [];
+            for (let i = lo; i <= hi; i++) {
+                const r = document.getElementById(`track-row-${i}`);
+                if (!r) return false;
+                rows.push(r);
+            }
+
+            const playingTrack = nowPlayingTracks[nowPlayingIndex] || null;
+
+            const [moved] = list.splice(from, 1);
+            list.splice(to, 0, moved);
+
+            const movedRow = rows[from - lo];
+            const targetRow = rows[to - lo];
+            // Senza questo l'animazione d'ingresso della riga ripartirebbe al reinserimento.
+            movedRow.classList.remove('track-row-enter');
+            movedRow.style.animationDelay = '';
+            if (to > from) div.insertBefore(movedRow, targetRow.nextSibling);
+            else div.insertBefore(movedRow, targetRow);
+
+            rows.splice(from - lo, 1);
+            rows.splice(to - lo, 0, movedRow);
+            rows.forEach((r, k) => {
+                const idx = lo + k;
+                r.id = `track-row-${idx}`;
+                r.dataset.index = idx;
+                const img = r.querySelector('img');
+                if (img) img.id = `track-img-${idx}`;
+            });
+
+            movedRow.classList.remove('moved');
+            void movedRow.offsetWidth;
+            movedRow.classList.add('moved');
+            movedRow.addEventListener('animationend', () => movedRow.classList.remove('moved'), { once: true });
+
+            syncPlayingAfterReorder(playingTrack);
+            scheduleSaveCustomOrder();
+            updateResetOrderBtn();
+            return true;
+        }
+
+        // L'animazione d'ingresso delle prime righe (fill-mode "both") tiene bloccato un
+        // transform che ha la precedenza su quelli inline: finita l'animazione si toglie,
+        // altrimenti quelle righe non seguirebbero il dito né si scosterebbero nel trascinamento.
+        function clearRowEnterAnimations() {
+            document.querySelectorAll('#trackList .track-row-enter').forEach(r => {
+                r.classList.remove('track-row-enter');
+                r.style.animationDelay = '';
+            });
+        }
+
+        // Trascinamento dalla maniglia: la riga segue il dito, le altre si scostano e al
+        // rilascio si applica UNO spostamento solo (moveTrack). Vicino ai bordi la lista scorre.
+        function startTrackDrag(e, row) {
+            const container = document.getElementById('resultsView');
+            const div = document.getElementById('trackList');
+            const grip = e.target.closest('.tm-grip');
+            if (!container || !div || !row || !grip) return;
+            e.preventDefault();
+            try { grip.setPointerCapture(e.pointerId); } catch (_) {}
+            clearRowEnterAnimations();
+
+            const from = parseInt(row.dataset.index, 10);
+            const maxIdx = div.querySelectorAll('.track-row').length - 1;
+            const centers = new Map();
+            const contentCenter = (idx) => {
+                if (centers.has(idx)) return centers.get(idx);
+                const r = document.getElementById(`track-row-${idx}`);
+                let c = null;
+                if (r) {
+                    const rect = r.getBoundingClientRect();
+                    c = rect.top - container.getBoundingClientRect().top + container.scrollTop + rect.height / 2;
+                }
+                centers.set(idx, c);
+                return c;
+            };
+            const myCenter = contentCenter(from);
+            const myH = row.getBoundingClientRect().height;
+            const startY = e.clientY;
+            const startScroll = container.scrollTop;
+            let lastY = startY, target = from, raf = 0, active = true;
+
+            row.classList.add('dragging');
+            hapticFeedback(15);
+
+            const shiftFor = (idx, t) => {
+                if (t > from && idx > from && idx <= t) return -myH;
+                if (t < from && idx >= t && idx < from) return myH;
+                return 0;
+            };
+            const applyShifts = (oldT, newT) => {
+                const lo = Math.min(from, oldT, newT), hi = Math.max(from, oldT, newT);
+                for (let i = lo; i <= hi; i++) {
+                    if (i === from) continue;
+                    const r = document.getElementById(`track-row-${i}`);
+                    if (!r) continue;
+                    const sh = shiftFor(i, newT);
+                    r.style.transition = 'transform 0.16s ease';
+                    r.style.transform = sh ? `translateY(${sh}px)` : '';
+                }
+            };
+
+            const frame = () => {
+                if (!active) return;
+                const rect = container.getBoundingClientRect();
+                const headerH = document.getElementById('resultsHeader')?.offsetHeight || 0;
+                const mp = document.getElementById('miniPlayer');
+                const covered = (mp && mp.classList.contains('visible')) ? mp.getBoundingClientRect().height + 24 : 0;
+                const topEdge = rect.top + headerH + 56;
+                const bottomEdge = rect.bottom - covered - 56;
+                let speed = 0;
+                if (lastY < topEdge) speed = -Math.min(16, (topEdge - lastY) / 4 + 2);
+                else if (lastY > bottomEdge) speed = Math.min(16, (lastY - bottomEdge) / 4 + 2);
+                if (speed) container.scrollTop += speed;
+
+                const dy = (lastY - startY) + (container.scrollTop - startScroll);
+                row.style.transform = `translateY(${dy}px)`;
+
+                const cy = myCenter + dy;
+                let t = from;
+                if (cy > myCenter) {
+                    while (t + 1 <= maxIdx) { const c = contentCenter(t + 1); if (c == null || c >= cy) break; t++; }
+                } else {
+                    while (t - 1 >= 0) { const c = contentCenter(t - 1); if (c == null || c <= cy) break; t--; }
+                }
+                if (t !== target) { applyShifts(target, t); target = t; hapticFeedback(8); }
+                raf = requestAnimationFrame(frame);
+            };
+
+            const onMove = (ev) => { lastY = ev.clientY; };
+            const finish = (commit) => {
+                if (!active) return;
+                active = false;
+                cancelAnimationFrame(raf);
+                grip.removeEventListener('pointermove', onMove);
+                grip.removeEventListener('pointerup', onUp);
+                grip.removeEventListener('pointercancel', onCancel);
+                try { grip.releasePointerCapture(e.pointerId); } catch (_) {}
+
+                // Pulizia visiva e spostamento reale nello stesso frame: nessun salto.
+                const touched = [];
+                const lo = Math.min(from, target), hi = Math.max(from, target);
+                for (let i = lo; i <= hi; i++) {
+                    const r = document.getElementById(`track-row-${i}`);
+                    if (!r) continue;
+                    touched.push(r);
+                    r.style.transition = 'none';
+                    r.style.transform = '';
+                }
+                row.classList.remove('dragging');
+                if (commit && target !== from) moveTrack(from, target);
+                requestAnimationFrame(() => touched.forEach(r => { r.style.transition = ''; }));
+            };
+            const onUp = () => finish(true);
+            const onCancel = () => finish(false);
+            grip.addEventListener('pointermove', onMove);
+            grip.addEventListener('pointerup', onUp);
+            grip.addEventListener('pointercancel', onCancel);
+            raf = requestAnimationFrame(frame);
+        }
+
+        function updateResetOrderBtn() {
+            const btn = document.getElementById('resetOrderBtn');
+            if (!btn) return;
+            btn.classList.toggle('hidden', !(reorderMode && hasCustomOrder(currentLoadedKey)));
+        }
+
+        function setReorderMode(on) {
+            reorderMode = !!on;
+            const div = document.getElementById('trackList');
+            const btn = document.getElementById('reorderPlaylistBtn');
+            if (div) div.classList.toggle('reordering', reorderMode);
+            if (reorderMode) clearRowEnterAnimations();
+            if (btn) {
+                btn.classList.toggle('reorder-on', reorderMode);
+                btn.title = reorderMode ? 'Fine riordino' : 'Riordina brani';
+                const icon = btn.querySelector('i');
+                if (icon) icon.className = reorderMode ? 'fa-solid fa-check' : 'fa-solid fa-arrows-up-down';
+            }
+            if (!reorderMode) {
+                flushCustomOrderSave();
+                document.getElementById('resetOrderBtn')?.classList.remove('armed');
+            }
+            updateResetOrderBtn();
+            if (reorderMode) {
+                let seen = false;
+                try { seen = localStorage.getItem(REORDER_HINT_KEY) === '1'; } catch (_) {}
+                if (!seen) {
+                    showToast('Usa le frecce o trascina la maniglia per spostare i brani.');
+                    try { localStorage.setItem(REORDER_HINT_KEY, '1'); } catch (_) {}
+                }
+            }
+        }
+
+        // Il pulsante Riordina compare solo per le playlist locali con almeno due brani.
+        function updateReorderBtn() {
+            const btn = document.getElementById('reorderPlaylistBtn');
+            if (!btn) return;
+            const show = currentListSource === 'local'
+                && typeof currentLoadedKey === 'string' && currentLoadedKey.startsWith('folder:')
+                && appState.tracks.length > 1;
+            btn.classList.toggle('hidden', !show);
+            if (!show && reorderMode) setReorderMode(false);
+        }
+
+        // Ripristina l'ordine originale della cartella (tocco doppio per evitare errori).
+        async function handleResetOrderTap() {
+            const btn = document.getElementById('resetOrderBtn');
+            if (!btn) return;
+            if (!btn.classList.contains('armed')) {
+                btn.classList.add('armed');
+                showToast('Tocca di nuovo per ripristinare l\'ordine originale.');
+                clearTimeout(resetOrderArmedTimer);
+                resetOrderArmedTimer = setTimeout(() => btn.classList.remove('armed'), 3000);
+                return;
+            }
+            clearTimeout(resetOrderArmedTimer);
+            btn.classList.remove('armed');
+            const key = currentLoadedKey;
+            if (!key || !key.startsWith('folder:')) return;
+            clearTimeout(orderSaveTimer);
+            pendingOrderSave = null;
+            try { localStorage.removeItem(customOrderKey(key)); } catch (_) {}
+            const playing = nowPlayingTracks[nowPlayingIndex] || null;
+            await openLocalPlaylist(key.slice('folder:'.length), currentLoadedTitle, true);
+            syncPlayingAfterReorder(playing);
+            showToast('Ordine originale ripristinato.');
+        }
+
+        function setupTrackReorder() {
+            const div = document.getElementById('trackList');
+            document.getElementById('reorderPlaylistBtn')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setReorderMode(!reorderMode);
+            });
+            document.getElementById('resetOrderBtn')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                handleResetOrderTap();
+            });
+            if (div) {
+                div.addEventListener('click', (e) => {
+                    const btn = e.target.closest('.tm-up, .tm-down');
+                    if (!btn || !reorderMode) return;
+                    e.stopPropagation();
+                    const row = btn.closest('.track-row');
+                    if (!row) return;
+                    const i = parseInt(row.dataset.index, 10);
+                    const j = btn.classList.contains('tm-up') ? i - 1 : i + 1;
+                    if (moveTrack(i, j)) keepRowInView(document.getElementById(`track-row-${j}`));
+                });
+                div.addEventListener('pointerdown', (e) => {
+                    if (!reorderMode) return;
+                    const grip = e.target.closest('.tm-grip');
+                    if (!grip) return;
+                    startTrackDrag(e, grip.closest('.track-row'));
+                });
+            }
+            document.addEventListener('visibilitychange', () => { if (document.hidden) flushCustomOrderSave(); });
+            window.addEventListener('pagehide', flushCustomOrderSave);
         }
 
         function scrollActiveTrackRowIntoView(row) {
