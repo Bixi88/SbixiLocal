@@ -1025,10 +1025,8 @@
         #trackList.reordering .track-move { display:flex; }
         .track-move button { background:transparent; border:0; padding:0; width:30px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-main); opacity:.9; }
         .track-move button:active { background:var(--accent); color:var(--bg-main); transform:scale(0.9); }
-        .track-move .tm-grip { touch-action:none; color:var(--accent); font-size:14px; cursor:grab; }
+        .track-move .tm-grip { touch-action:none; color:var(--accent); font-size:14px; cursor:grab; width:40px; border-radius:999px; }
         #trackList.reordering .track-row { cursor:default; }
-        #trackList.reordering .track-row:first-child .tm-up,
-        #trackList.reordering .track-row:last-child .tm-down { opacity:.25; pointer-events:none; }
         /* Lampo d'accento sulla riga appena spostata: solo bordo interno (box-shadow inset),
            così non copre la pillola colorata del brano in ascolto e non viene tagliato dal
            content-visibility della riga. */
@@ -1043,6 +1041,15 @@
             margin-left: -8px; margin-right: -8px; padding-left: 8px; padding-right: 8px;
         }
         .track-row.dragging::after { display:none; }
+        /* Rilascio: la pillola mantiene ESATTAMENTE la stessa grandezza del trascinamento
+           (stessi margini/padding) e sfuma soltanto sfondo e ombra; poi la classe viene tolta. */
+        .track-row.dropping {
+            content-visibility: visible; z-index: 20; border-radius: 18px;
+            margin-left: -8px; margin-right: -8px; padding-left: 8px; padding-right: 8px;
+            background: transparent; box-shadow: 0 0 0 rgba(0,0,0,0);
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        .track-row.dropping::after { display:none; }
         /* Sulla pillola del brano in ascolto (sfondo --immersive-accent) i controlli usano lo
            stesso colore testo calcolato per la pillola, altrimenti sparirebbero. */
         html.immersive .track-row.playing .track-move { background: rgba(0,0,0,0.14); }
@@ -5087,8 +5094,6 @@
                         <p class="text-xs truncate mt-1 custom-text-muted font-medium">${escapeHtml(track.channel)}</p>
                     </div>
                     <div class="track-move">
-                        <button type="button" class="tm-up" aria-label="Sposta in alto"><i class="fa-solid fa-chevron-up"></i></button>
-                        <button type="button" class="tm-down" aria-label="Sposta in basso"><i class="fa-solid fa-chevron-down"></i></button>
                         <button type="button" class="tm-grip" aria-label="Trascina per spostare"><i class="fa-solid fa-grip-lines"></i></button>
                     </div>
                 `;
@@ -5439,7 +5444,10 @@
                     r.style.transition = 'none';
                     r.style.transform = '';
                 }
+                row.classList.add('dropping');
                 row.classList.remove('dragging');
+                clearTimeout(row._dropTimer);
+                row._dropTimer = setTimeout(() => row.classList.remove('dropping'), 340);
                 if (commit && target !== from) moveTrack(from, target);
                 requestAnimationFrame(() => touched.forEach(r => { r.style.transition = ''; }));
             };
@@ -5530,16 +5538,6 @@
                 handleResetOrderTap();
             });
             if (div) {
-                div.addEventListener('click', (e) => {
-                    const btn = e.target.closest('.tm-up, .tm-down');
-                    if (!btn || !reorderMode) return;
-                    e.stopPropagation();
-                    const row = btn.closest('.track-row');
-                    if (!row) return;
-                    const i = parseInt(row.dataset.index, 10);
-                    const j = btn.classList.contains('tm-up') ? i - 1 : i + 1;
-                    if (moveTrack(i, j)) keepRowInView(document.getElementById(`track-row-${j}`));
-                });
                 div.addEventListener('pointerdown', (e) => {
                     if (!reorderMode) return;
                     const grip = e.target.closest('.tm-grip');
