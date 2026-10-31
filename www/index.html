@@ -5747,7 +5747,13 @@
         // per i cambi di stato veri (nuovo brano, play/pausa) - la posizione durante
         // la normale riproduzione invece non ha bisogno di un aggiornamento continuo:
         // Android stesso interpola la barra tra un aggiornamento e l'altro.
+        // Vero dopo che lo sleep timer ha spento servizio e notifica: finché non riparte la
+        // riproduzione non dobbiamo aggiornare il lato nativo, altrimenti il servizio in
+        // primo piano verrebbe riavviato dal primo aggiornamento di pausa/posizione.
+        let nativeStoppedBySleepTimer = false;
+
         function pushNativeNowPlaying(immediate) {
+            if (nativeStoppedBySleepTimer) return;
             const now = Date.now();
             if (!immediate && now - lastNativePushAt < 4000) return;
             lastNativePushAt = now;
@@ -5789,6 +5795,7 @@
         }
 
         function updateMediaSessionState(isPlaying) {
+            if (isPlaying) nativeStoppedBySleepTimer = false;
             if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
             pushNativeNowPlaying(true);
         }
@@ -5975,6 +5982,10 @@
             if (sleepTimerHandle) clearTimeout(sleepTimerHandle);
             sleepTimerHandle = setTimeout(() => {
                 if (player?.pauseVideo) { try { player.pauseVideo(); } catch (e) {} }
+                // Fine ascolto notturno: ferma servizio in primo piano e notifica, così
+                // Android non tiene l'app in Background fino al mattino.
+                nativeStoppedBySleepTimer = true;
+                try { SbixiMediaControls.clear(); } catch (e) {}
                 sleepTimerHandle = null;
                 updateSleepTimerButtonUI();
             }, minutes * 60 * 1000);
